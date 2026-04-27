@@ -130,6 +130,7 @@ type ErrorEventSummaryQuery struct {
 	FailureStage string
 	ErrorCode    string
 	StatusCode   *int
+	RequestID    string
 	Start        time.Time
 	End          time.Time
 	GroupBy      []string
@@ -476,6 +477,7 @@ func (s *ErrorEventStore) Summarize(ctx context.Context, query ErrorEventSummary
 		FailureStage: query.FailureStage,
 		ErrorCode:    query.ErrorCode,
 		StatusCode:   query.StatusCode,
+		RequestID:    query.RequestID,
 		Start:        query.Start,
 		End:          query.End,
 	})

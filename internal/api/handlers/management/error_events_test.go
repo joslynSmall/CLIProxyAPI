@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,9 @@ type fakeErrorEventQueryStore struct {
 	lastSummary   mongostate.ErrorEventSummaryQuery
 	summaryResult mongostate.ErrorEventSummaryResult
 	summaryErr    error
+	summaryCalls  []mongostate.ErrorEventSummaryQuery
+	summaryByKey  map[string]mongostate.ErrorEventSummaryResult
+	summaryErrMap map[string]error
 }
 
 func (f *fakeErrorEventQueryStore) Query(_ context.Context, query mongostate.ErrorEventQuery) (mongostate.ErrorEventQueryResult, error) {
@@ -41,7 +45,32 @@ func (f *fakeErrorEventQueryStore) Insert(_ context.Context, _ *mongostate.Error
 func (f *fakeErrorEventQueryStore) Summarize(_ context.Context, query mongostate.ErrorEventSummaryQuery) (mongostate.ErrorEventSummaryResult, error) {
 	f.summaryCalled = true
 	f.lastSummary = query
+	f.summaryCalls = append(f.summaryCalls, query)
+	key := strings.Join(query.GroupBy, ",")
+	if errByKey := f.summaryErrMap; errByKey != nil {
+		if err, ok := errByKey[key]; ok && err != nil {
+			return mongostate.ErrorEventSummaryResult{}, err
+		}
+	}
+	if resultByKey := f.summaryByKey; resultByKey != nil {
+		if result, ok := resultByKey[key]; ok {
+			return result, nil
+		}
+	}
 	return f.summaryResult, f.summaryErr
+}
+
+type fakeErrorEventListOnlyStore struct {
+	result mongostate.ErrorEventQueryResult
+	err    error
+}
+
+func (f *fakeErrorEventListOnlyStore) Query(_ context.Context, _ mongostate.ErrorEventQuery) (mongostate.ErrorEventQueryResult, error) {
+	return f.result, f.err
+}
+
+func (f *fakeErrorEventListOnlyStore) Insert(_ context.Context, _ *mongostate.ErrorEventRecord) error {
+	return nil
 }
 
 type fakeDeletionProgressStore struct {
@@ -357,6 +386,231 @@ func TestListErrorEvents_IncludesProgressMetadata(t *testing.T) {
 	}
 }
 
+func TestInsightsErrorEvents_StoreUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mongostate.SetGlobalErrorEventStore(nil)
+
+	h := &Handler{}
+	r := gin.New()
+	r.GET("/v0/management/error-events/insights", h.InsightsErrorEvents)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/error-events/insights", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestInsightsErrorEvents_SummaryUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mongostate.SetGlobalErrorEventStore(&fakeErrorEventListOnlyStore{})
+	t.Cleanup(func() { mongostate.SetGlobalErrorEventStore(nil) })
+
+	h := &Handler{}
+	r := gin.New()
+	r.GET("/v0/management/error-events/insights", h.InsightsErrorEvents)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/error-events/insights", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestInsightsErrorEvents_InvalidParams(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := &fakeErrorEventQueryStore{}
+	mongostate.SetGlobalErrorEventStore(store)
+	t.Cleanup(func() { mongostate.SetGlobalErrorEventStore(nil) })
+
+	h := &Handler{}
+	r := gin.New()
+	r.GET("/v0/management/error-events/insights", h.InsightsErrorEvents)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/error-events/insights?start=bad", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid start status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/error-events/insights?end=bad", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid end status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/error-events/insights?status_code=bad", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status_code status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestInsightsErrorEvents_SuccessAndMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	scopeKey := mongostate.BuildErrorEventProgressScopeKey("openai", "auth-a", "gpt-4.1")
+	now := time.Date(2026, 4, 27, 8, 0, 0, 0, time.UTC)
+	store := &fakeErrorEventQueryStore{
+		result: mongostate.ErrorEventQueryResult{
+			Items: []mongostate.ErrorEventItem{{
+				ID:              "evt-1",
+				Provider:        "openai",
+				AuthID:          "auth-a",
+				Model:           "gpt-4.1",
+				NormalizedModel: "gpt-4.1",
+				RequestID:       "req-1",
+				FailureStage:    "request_execution",
+				ErrorCode:       "upstream_timeout",
+				StatusCode:      503,
+				OccurredAt:      now,
+				CreatedAt:       now,
+				Failed:          true,
+			}},
+			Total:    12,
+			Page:     2,
+			PageSize: 5,
+		},
+		summaryByKey: map[string]mongostate.ErrorEventSummaryResult{
+			"provider,auth_id,normalized_model": {
+				GroupBy: []string{"provider", "auth_id", "normalized_model"},
+				Items: []mongostate.ErrorEventSummaryItem{{
+					Provider:              "openai",
+					AuthID:                "auth-a",
+					NormalizedModel:       "gpt-4.1",
+					Total:                 7,
+					CircuitCountableTotal: 6,
+				}},
+			},
+			"error_code": {
+				GroupBy: []string{"error_code"},
+				Items: []mongostate.ErrorEventSummaryItem{{
+					ErrorCode:             "upstream_timeout",
+					Total:                 7,
+					CircuitCountableTotal: 6,
+				}},
+			},
+			"failure_stage": {
+				GroupBy: []string{"failure_stage"},
+				Items: []mongostate.ErrorEventSummaryItem{{
+					FailureStage:          "request_execution",
+					Total:                 7,
+					CircuitCountableTotal: 6,
+				}},
+			},
+			"status_code": {
+				GroupBy: []string{"status_code"},
+				Items: []mongostate.ErrorEventSummaryItem{{
+					StatusCode:            func() *int { value := 503; return &value }(),
+					Total:                 7,
+					CircuitCountableTotal: 6,
+				}},
+			},
+		},
+	}
+	mongostate.SetGlobalErrorEventStore(store)
+	t.Cleanup(func() { mongostate.SetGlobalErrorEventStore(nil) })
+
+	h := &Handler{}
+	r := gin.New()
+	r.GET("/v0/management/error-events/insights", h.InsightsErrorEvents)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/v0/management/error-events/insights?provider=OpenAI&auth_id=auth-a&model=gpt-4.1&failure_stage=request_execution&error_code=upstream_timeout&status_code=503&request_id=req-1&page=2&page_size=5&summary_limit=20",
+		nil,
+	)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if !store.queryCalled {
+		t.Fatal("expected list query to be called")
+	}
+	if store.lastQuery.RequestID != "req-1" {
+		t.Fatalf("request_id = %q, want req-1", store.lastQuery.RequestID)
+	}
+	if store.lastQuery.Page != 2 || store.lastQuery.PageSize != 5 {
+		t.Fatalf("pagination mismatch: page=%d page_size=%d", store.lastQuery.Page, store.lastQuery.PageSize)
+	}
+	if len(store.summaryCalls) != 4 {
+		t.Fatalf("summary call count = %d, want 4", len(store.summaryCalls))
+	}
+	for _, query := range store.summaryCalls {
+		if query.RequestID != "req-1" {
+			t.Fatalf("summary request_id = %q, want req-1", query.RequestID)
+		}
+		if query.Limit != 20 {
+			t.Fatalf("summary limit = %d, want 20", query.Limit)
+		}
+	}
+
+	var got struct {
+		Metrics struct {
+			Total                 int64 `json:"total"`
+			ScopeCount            int   `json:"scope_count"`
+			CircuitCountableTotal int64 `json:"circuit_countable_total"`
+		} `json:"metrics"`
+		ScopeRanking []struct {
+			ProgressScopeKey string `json:"progress_scope_key"`
+		} `json:"scope_ranking"`
+		Summary struct {
+			ByErrorCode []struct {
+				ErrorCode string `json:"error_code"`
+				Total     int64  `json:"total"`
+			} `json:"by_error_code"`
+		} `json:"summary"`
+		Items []struct {
+			ID               string `json:"id"`
+			ProgressScopeKey string `json:"progress_scope_key"`
+		} `json:"items"`
+		Meta struct {
+			LastUpdated     time.Time `json:"last_updated"`
+			ProgressByScope map[string]struct {
+				Breaker struct {
+					Current int `json:"current"`
+				} `json:"breaker"`
+			} `json:"progress_by_scope"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Metrics.Total != 12 {
+		t.Fatalf("metrics.total = %d, want 12", got.Metrics.Total)
+	}
+	if got.Metrics.ScopeCount != 1 {
+		t.Fatalf("metrics.scope_count = %d, want 1", got.Metrics.ScopeCount)
+	}
+	if got.Metrics.CircuitCountableTotal != 6 {
+		t.Fatalf("metrics.circuit_countable_total = %d, want 6", got.Metrics.CircuitCountableTotal)
+	}
+	if len(got.Items) != 1 || got.Items[0].ID != "evt-1" {
+		t.Fatalf("items mismatch: %+v", got.Items)
+	}
+	if len(got.ScopeRanking) != 1 {
+		t.Fatalf("scope_ranking len = %d, want 1", len(got.ScopeRanking))
+	}
+	if len(got.Summary.ByErrorCode) != 1 || got.Summary.ByErrorCode[0].ErrorCode != "upstream_timeout" {
+		t.Fatalf("summary.by_error_code mismatch: %+v", got.Summary.ByErrorCode)
+	}
+	if got.Meta.LastUpdated.IsZero() {
+		t.Fatal("meta.last_updated should not be zero")
+	}
+	if _, ok := got.Meta.ProgressByScope[scopeKey]; !ok {
+		t.Fatalf("missing progress scope %q", scopeKey)
+	}
+}
+
 func TestSummarizeErrorEvents_StoreUnavailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mongostate.SetGlobalErrorEventStore(nil)
@@ -432,7 +686,7 @@ func TestSummarizeErrorEvents_SuccessAndQueryMapping(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/v0/management/error-events/summary?provider=Gemini&auth_id=a1&model=gpt-5&failure_stage=Request_Execution&error_code=UPSTREAM_TIMEOUT&status_code=503&start=2026-04-26T00:00:00Z&end=2026-04-27T00:00:00Z&group_by=provider,error_code&limit=20",
+		"/v0/management/error-events/summary?provider=Gemini&auth_id=a1&model=gpt-5&failure_stage=Request_Execution&error_code=UPSTREAM_TIMEOUT&status_code=503&request_id=req-1&start=2026-04-26T00:00:00Z&end=2026-04-27T00:00:00Z&group_by=provider,error_code&limit=20",
 		nil,
 	)
 	w := httptest.NewRecorder()
@@ -455,6 +709,9 @@ func TestSummarizeErrorEvents_SuccessAndQueryMapping(t *testing.T) {
 	}
 	if store.lastSummary.StatusCode == nil || *store.lastSummary.StatusCode != 503 {
 		t.Fatalf("status_code = %v, want 503", store.lastSummary.StatusCode)
+	}
+	if store.lastSummary.RequestID != "req-1" {
+		t.Fatalf("request_id = %q, want req-1", store.lastSummary.RequestID)
 	}
 	if store.lastSummary.Limit != 20 {
 		t.Fatalf("limit = %d, want 20", store.lastSummary.Limit)

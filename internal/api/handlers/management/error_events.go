@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -13,6 +14,34 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
+
+type errorEventsInsightsMetrics struct {
+	Total                 int64 `json:"total"`
+	ScopeCount            int   `json:"scope_count"`
+	CircuitCountableTotal int64 `json:"circuit_countable_total"`
+}
+
+type errorEventsInsightsSummary struct {
+	ByErrorCode    []mongostate.ErrorEventSummaryItem `json:"by_error_code"`
+	ByFailureStage []mongostate.ErrorEventSummaryItem `json:"by_failure_stage"`
+	ByStatusCode   []mongostate.ErrorEventSummaryItem `json:"by_status_code"`
+}
+
+type errorEventsInsightsMeta struct {
+	ProgressByScope map[string]mongostate.ErrorEventProgressSnapshot `json:"progress_by_scope,omitempty"`
+	LastUpdated     time.Time                                        `json:"last_updated"`
+}
+
+type errorEventsInsightsResult struct {
+	Metrics      errorEventsInsightsMetrics         `json:"metrics"`
+	ScopeRanking []mongostate.ErrorEventSummaryItem `json:"scope_ranking"`
+	Summary      errorEventsInsightsSummary         `json:"summary"`
+	Items        []mongostate.ErrorEventItem        `json:"items"`
+	Total        int64                              `json:"total"`
+	Page         int                                `json:"page"`
+	PageSize     int                                `json:"page_size"`
+	Meta         errorEventsInsightsMeta            `json:"meta"`
+}
 
 // ListErrorEvents returns paged MongoDB records of failed request events.
 func (h *Handler) ListErrorEvents(c *gin.Context) {
@@ -64,6 +93,182 @@ func (h *Handler) ListErrorEvents(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// InsightsErrorEvents returns unified error-event insights for one request.
+func (h *Handler) InsightsErrorEvents(c *gin.Context) {
+	store := mongostate.GetGlobalErrorEventStore()
+	if store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "error event store unavailable"})
+		return
+	}
+	summarizer, ok := store.(interface {
+		Summarize(ctx context.Context, query mongostate.ErrorEventSummaryQuery) (mongostate.ErrorEventSummaryResult, error)
+	})
+	if !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "error event summary unavailable"})
+		return
+	}
+
+	start, err := parseRFC3339QueryTime(c.Query("start"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time, expected RFC3339"})
+		return
+	}
+	end, err := parseRFC3339QueryTime(c.Query("end"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time, expected RFC3339"})
+		return
+	}
+
+	statusCode, err := parseOptionalIntQuery(c.Query("status_code"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status_code"})
+		return
+	}
+
+	page := parsePositiveIntQuery(c.Query("page"), 1)
+	pageSize := parsePositiveIntQuery(c.Query("page_size"), 20)
+	summaryLimit := parsePositiveIntQuery(c.Query("summary_limit"), 100)
+	if summaryLimit > 500 {
+		summaryLimit = 500
+	}
+
+	baseSummaryQuery := mongostate.ErrorEventSummaryQuery{
+		Provider:     strings.ToLower(strings.TrimSpace(c.Query("provider"))),
+		AuthID:       strings.TrimSpace(c.Query("auth_id")),
+		Model:        strings.TrimSpace(c.Query("model")),
+		FailureStage: strings.ToLower(strings.TrimSpace(c.Query("failure_stage"))),
+		ErrorCode:    strings.ToLower(strings.TrimSpace(c.Query("error_code"))),
+		StatusCode:   statusCode,
+		RequestID:    strings.TrimSpace(c.Query("request_id")),
+		Start:        start,
+		End:          end,
+		Limit:        summaryLimit,
+	}
+
+	listResult, err := store.Query(c.Request.Context(), mongostate.ErrorEventQuery{
+		Provider:     baseSummaryQuery.Provider,
+		AuthID:       baseSummaryQuery.AuthID,
+		Model:        baseSummaryQuery.Model,
+		FailureStage: baseSummaryQuery.FailureStage,
+		ErrorCode:    baseSummaryQuery.ErrorCode,
+		StatusCode:   baseSummaryQuery.StatusCode,
+		RequestID:    baseSummaryQuery.RequestID,
+		Start:        baseSummaryQuery.Start,
+		End:          baseSummaryQuery.End,
+		Page:         page,
+		PageSize:     pageSize,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.enrichErrorEventProgress(c.Request.Context(), &listResult); err != nil {
+		log.WithError(err).Warn("management: enrich insights list progress")
+	}
+
+	scopeRanking, err := summarizer.Summarize(c.Request.Context(), mongostate.ErrorEventSummaryQuery{
+		Provider:     baseSummaryQuery.Provider,
+		AuthID:       baseSummaryQuery.AuthID,
+		Model:        baseSummaryQuery.Model,
+		FailureStage: baseSummaryQuery.FailureStage,
+		ErrorCode:    baseSummaryQuery.ErrorCode,
+		StatusCode:   baseSummaryQuery.StatusCode,
+		RequestID:    baseSummaryQuery.RequestID,
+		Start:        baseSummaryQuery.Start,
+		End:          baseSummaryQuery.End,
+		GroupBy:      []string{"provider", "auth_id", "normalized_model"},
+		Limit:        baseSummaryQuery.Limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := h.enrichErrorEventSummaryProgress(c.Request.Context(), &scopeRanking); err != nil {
+		log.WithError(err).Warn("management: enrich insights scope ranking progress")
+	}
+
+	byErrorCode, err := summarizer.Summarize(c.Request.Context(), mongostate.ErrorEventSummaryQuery{
+		Provider:     baseSummaryQuery.Provider,
+		AuthID:       baseSummaryQuery.AuthID,
+		Model:        baseSummaryQuery.Model,
+		FailureStage: baseSummaryQuery.FailureStage,
+		ErrorCode:    baseSummaryQuery.ErrorCode,
+		StatusCode:   baseSummaryQuery.StatusCode,
+		RequestID:    baseSummaryQuery.RequestID,
+		Start:        baseSummaryQuery.Start,
+		End:          baseSummaryQuery.End,
+		GroupBy:      []string{"error_code"},
+		Limit:        baseSummaryQuery.Limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	byFailureStage, err := summarizer.Summarize(c.Request.Context(), mongostate.ErrorEventSummaryQuery{
+		Provider:     baseSummaryQuery.Provider,
+		AuthID:       baseSummaryQuery.AuthID,
+		Model:        baseSummaryQuery.Model,
+		FailureStage: baseSummaryQuery.FailureStage,
+		ErrorCode:    baseSummaryQuery.ErrorCode,
+		StatusCode:   baseSummaryQuery.StatusCode,
+		RequestID:    baseSummaryQuery.RequestID,
+		Start:        baseSummaryQuery.Start,
+		End:          baseSummaryQuery.End,
+		GroupBy:      []string{"failure_stage"},
+		Limit:        baseSummaryQuery.Limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	byStatusCode, err := summarizer.Summarize(c.Request.Context(), mongostate.ErrorEventSummaryQuery{
+		Provider:     baseSummaryQuery.Provider,
+		AuthID:       baseSummaryQuery.AuthID,
+		Model:        baseSummaryQuery.Model,
+		FailureStage: baseSummaryQuery.FailureStage,
+		ErrorCode:    baseSummaryQuery.ErrorCode,
+		StatusCode:   baseSummaryQuery.StatusCode,
+		RequestID:    baseSummaryQuery.RequestID,
+		Start:        baseSummaryQuery.Start,
+		End:          baseSummaryQuery.End,
+		GroupBy:      []string{"status_code"},
+		Limit:        baseSummaryQuery.Limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	progressByScope := mergeErrorEventProgressByScope(
+		listResult.Meta.ProgressByScope,
+		scopeRanking.Meta.ProgressByScope,
+	)
+	response := errorEventsInsightsResult{
+		Metrics: errorEventsInsightsMetrics{
+			Total:                 listResult.Total,
+			ScopeCount:            len(scopeRanking.Items),
+			CircuitCountableTotal: sumErrorEventCircuitCountableTotals(scopeRanking.Items),
+		},
+		ScopeRanking: scopeRanking.Items,
+		Summary: errorEventsInsightsSummary{
+			ByErrorCode:    byErrorCode.Items,
+			ByFailureStage: byFailureStage.Items,
+			ByStatusCode:   byStatusCode.Items,
+		},
+		Items:    listResult.Items,
+		Total:    listResult.Total,
+		Page:     listResult.Page,
+		PageSize: listResult.PageSize,
+		Meta: errorEventsInsightsMeta{
+			ProgressByScope: progressByScope,
+			LastUpdated:     time.Now().UTC(),
+		},
+	}
+	c.JSON(http.StatusOK, response)
+}
+
 // SummarizeErrorEvents returns aggregated error-event buckets.
 func (h *Handler) SummarizeErrorEvents(c *gin.Context) {
 	store := mongostate.GetGlobalErrorEventStore()
@@ -106,6 +311,7 @@ func (h *Handler) SummarizeErrorEvents(c *gin.Context) {
 		FailureStage: strings.ToLower(strings.TrimSpace(c.Query("failure_stage"))),
 		ErrorCode:    strings.ToLower(strings.TrimSpace(c.Query("error_code"))),
 		StatusCode:   statusCode,
+		RequestID:    strings.TrimSpace(c.Query("request_id")),
 		Start:        start,
 		End:          end,
 		GroupBy:      parseErrorEventSummaryGroupBy(c.Query("group_by")),
@@ -146,6 +352,30 @@ func parseErrorEventSummaryGroupBy(raw string) []string {
 		out = append(out, strings.TrimSpace(part))
 	}
 	return out
+}
+
+func mergeErrorEventProgressByScope(groups ...map[string]mongostate.ErrorEventProgressSnapshot) map[string]mongostate.ErrorEventProgressSnapshot {
+	result := make(map[string]mongostate.ErrorEventProgressSnapshot)
+	for _, group := range groups {
+		for scopeKey, snapshot := range group {
+			if strings.TrimSpace(scopeKey) == "" {
+				continue
+			}
+			result[scopeKey] = snapshot
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func sumErrorEventCircuitCountableTotals(items []mongostate.ErrorEventSummaryItem) int64 {
+	var total int64
+	for _, item := range items {
+		total += item.CircuitCountableTotal
+	}
+	return total
 }
 
 func (h *Handler) enrichErrorEventProgress(ctx context.Context, result *mongostate.ErrorEventQueryResult) error {

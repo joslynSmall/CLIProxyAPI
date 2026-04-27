@@ -98,6 +98,20 @@ openai-compat-network-retry: 1
 # 第一次重试等待该时长，后续按 2 倍递增。设为 0 表示不等待直接重试。
 openai-compat-network-retry-backoff-ms: 500
 
+# Provider 统一限流配置（主动窗口 + 429 冻结 + 流并发上限）。
+# scope:
+#   - credential: 按凭据维度限流（推荐）
+#   - provider: 按 provider 维度限流（同 provider 下共享配额）
+provider-rate-limit:
+  enabled: true
+  scope: credential
+  rate-limit: 40
+  rate-window-seconds: 60
+  max-stream-concurrency: 5
+  reactive-base-delay-ms: 1000
+  reactive-max-delay-seconds: 60
+  reactive-jitter-ms: 300
+
 # 入口层缺省思考深度策略（仅针对标准入口协议）
 # 可通过管理 API 实时更新并写回当前运行配置。
 # format/policy/mode/value 取值请以 /v0/management/reasoning-ingress-options 返回为准。

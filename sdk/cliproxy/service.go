@@ -593,6 +593,10 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	if s.coreManager != nil {
+		s.coreManager.SetConfig(s.cfg)
+		s.coreManager.SetOAuthModelAlias(s.cfg.OAuthModelAlias)
+	}
 	if errFailureStore := s.initCircuitBreakerFailureStore(ctx); errFailureStore != nil {
 		return fmt.Errorf("cliproxy: failed to initialize circuit breaker failure store: %w", errFailureStore)
 	}

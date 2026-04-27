@@ -36,6 +36,10 @@ type releaseInfo struct {
 	Name    string `json:"name"`
 }
 
+type putProviderRateLimitRequest struct {
+	Value *config.ProviderRateLimitConfig `json:"value"`
+}
+
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
 func (h *Handler) GetLatestVersion(c *gin.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -261,6 +265,25 @@ func (h *Handler) GetRequestRetry(c *gin.Context) {
 }
 func (h *Handler) PutRequestRetry(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.RequestRetry = v })
+}
+
+// Provider rate limit
+func (h *Handler) GetProviderRateLimit(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"provider-rate-limit": h.cfg.ProviderRateLimit})
+}
+func (h *Handler) PutProviderRateLimit(c *gin.Context) {
+	var body putProviderRateLimitRequest
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	normalized, err := config.NormalizeProviderRateLimitConfig(*body.Value)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid value", "message": err.Error()})
+		return
+	}
+	h.cfg.ProviderRateLimit = normalized
+	h.persist(c)
 }
 
 // Max retry interval

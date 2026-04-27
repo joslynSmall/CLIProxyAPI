@@ -295,7 +295,7 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), errCode: extractUpstreamErrorCode(bodyBytes, true)}
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						sErr.retryAfter = retryAfter
@@ -315,7 +315,7 @@ attemptLoop:
 
 		switch {
 		case lastStatus != 0:
-			sErr := statusErr{code: lastStatus, msg: string(lastBody)}
+			sErr := statusErr{code: lastStatus, msg: string(lastBody), errCode: extractUpstreamErrorCode(lastBody, true)}
 			if lastStatus == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
@@ -449,7 +449,7 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), errCode: extractUpstreamErrorCode(bodyBytes, true)}
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						sErr.retryAfter = retryAfter
@@ -520,7 +520,7 @@ attemptLoop:
 
 		switch {
 		case lastStatus != 0:
-			sErr := statusErr{code: lastStatus, msg: string(lastBody)}
+			sErr := statusErr{code: lastStatus, msg: string(lastBody), errCode: extractUpstreamErrorCode(lastBody, true)}
 			if lastStatus == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
@@ -851,7 +851,7 @@ attemptLoop:
 						continue attemptLoop
 					}
 				}
-				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+				sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), errCode: extractUpstreamErrorCode(bodyBytes, true)}
 				if httpResp.StatusCode == http.StatusTooManyRequests {
 					if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 						sErr.retryAfter = retryAfter
@@ -911,7 +911,7 @@ attemptLoop:
 
 		switch {
 		case lastStatus != 0:
-			sErr := statusErr{code: lastStatus, msg: string(lastBody)}
+			sErr := statusErr{code: lastStatus, msg: string(lastBody), errCode: extractUpstreamErrorCode(lastBody, true)}
 			if lastStatus == http.StatusTooManyRequests {
 				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 					sErr.retryAfter = retryAfter
@@ -1064,7 +1064,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			log.Debugf("antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 			continue
 		}
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), errCode: extractUpstreamErrorCode(bodyBytes, true)}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
@@ -1075,7 +1075,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 
 	switch {
 	case lastStatus != 0:
-		sErr := statusErr{code: lastStatus, msg: string(lastBody)}
+		sErr := statusErr{code: lastStatus, msg: string(lastBody), errCode: extractUpstreamErrorCode(lastBody, true)}
 		if lastStatus == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
@@ -1152,7 +1152,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), errCode: extractUpstreamErrorCode(bodyBytes, true)}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter

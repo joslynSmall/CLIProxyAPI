@@ -292,7 +292,12 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 
 		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		err = statusErr{
+			code:       errCode,
+			msg:        string(b),
+			errCode:    extractUpstreamErrorCode(b, false),
+			retryAfter: retryAfter,
+		}
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -401,7 +406,12 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		err = statusErr{
+			code:       errCode,
+			msg:        string(b),
+			errCode:    extractUpstreamErrorCode(b, false),
+			retryAfter: retryAfter,
+		}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)

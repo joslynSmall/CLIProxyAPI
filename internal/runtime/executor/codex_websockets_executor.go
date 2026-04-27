@@ -236,7 +236,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			e.recordCodexFailure(auth, circuitModel)
-			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return resp, statusErr{code: respHS.StatusCode, msg: string(bodyErr), errCode: extractUpstreamErrorCode(bodyErr, false)}
 		}
 		recordAPIResponseError(ctx, e.cfg, errDial)
 		e.recordCodexFailure(auth, circuitModel)
@@ -442,7 +442,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			e.recordCodexFailure(auth, circuitModel)
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
+			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr), errCode: extractUpstreamErrorCode(bodyErr, false)}
 		}
 		recordAPIResponseError(ctx, e.cfg, errDial)
 		e.recordCodexFailure(auth, circuitModel)
@@ -973,9 +973,13 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 		out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
 	}
 
+	errCode := extractUpstreamErrorCode(payload, false)
+	if errCode == "" {
+		errCode = extractUpstreamErrorCode(out, false)
+	}
 	headers := parseCodexWebsocketErrorHeaders(payload)
 	return statusErrWithHeaders{
-		statusErr: statusErr{code: status, msg: string(out)},
+		statusErr: statusErr{code: status, msg: string(out), errCode: errCode},
 		headers:   headers,
 	}, true
 }

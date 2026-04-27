@@ -372,7 +372,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			e.recordOpenAICompatFailure(auth, circuitModel)
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b), errCode: extractUpstreamErrorCode(b, false)}
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -557,7 +557,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			log.Errorf("openai compat executor stream: close response body error: %v", errClose)
 		}
 		e.recordOpenAICompatFailure(auth, circuitModel)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b), errCode: extractUpstreamErrorCode(b, false)}
 		return nil, err
 	}
 
@@ -1208,6 +1208,7 @@ func synthesizeOpenAIResponsesCompletion(modelName string) [][]byte {
 type statusErr struct {
 	code       int
 	msg        string
+	errCode    string
 	retryAfter *time.Duration
 }
 
@@ -1217,5 +1218,6 @@ func (e statusErr) Error() string {
 	}
 	return fmt.Sprintf("status %d", e.code)
 }
+func (e statusErr) ErrorCode() string          { return strings.TrimSpace(e.errCode) }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }

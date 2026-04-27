@@ -833,7 +833,7 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 }
 
 func newGeminiStatusErr(statusCode int, body []byte) statusErr {
-	err := statusErr{code: statusCode, msg: string(body)}
+	err := statusErr{code: statusCode, msg: string(body), errCode: extractUpstreamErrorCode(body, true)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := parseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter

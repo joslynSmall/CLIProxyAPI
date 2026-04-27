@@ -158,6 +158,8 @@ type Manager struct {
 	// runtimeConfig stores the latest application config for request-time decisions.
 	// It is initialized in NewManager; never Load() before first Store().
 	runtimeConfig atomic.Value
+	// providerRateLimiter throttles upstream requests with proactive/reactive/concurrency controls.
+	providerRateLimiter *providerRateLimiter
 
 	// circuitFailureStore is the strong-consistency source for auth+model failure counts.
 	circuitFailureStore CircuitBreakerFailureStore
@@ -179,14 +181,15 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
-		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
+		store:               store,
+		executors:           make(map[string]ProviderExecutor),
+		selector:            selector,
+		hook:                hook,
+		auths:               make(map[string]*Auth),
+		providerOffsets:     make(map[string]int),
+		modelPoolOffsets:    make(map[string]int),
+		refreshSemaphore:    make(chan struct{}, refreshMaxConcurrency),
+		providerRateLimiter: newProviderRateLimiter(&internalconfig.Config{}),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -297,7 +300,24 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	if m.providerRateLimiter != nil {
+		m.providerRateLimiter.UpdateConfig(cfg)
+	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+}
+
+func (m *Manager) waitProviderRateLimit(ctx context.Context, auth *Auth, provider string, stream bool) (func(), error) {
+	if m == nil || m.providerRateLimiter == nil {
+		return nil, nil
+	}
+	return m.providerRateLimiter.Wait(ctx, auth, provider, stream)
+}
+
+func (m *Manager) notifyProviderRateLimitResult(auth *Auth, provider string, result Result) {
+	if m == nil || m.providerRateLimiter == nil {
+		return
+	}
+	m.providerRateLimiter.OnResult(auth, provider, result)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -673,10 +693,13 @@ func openAIResponsesBootstrapEventType(payload []byte) string {
 	return ""
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk) *cliproxyexecutor.StreamResult {
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, onDone func()) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		if onDone != nil {
+			defer onDone()
+		}
 		var failed bool
 		forward := true
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
@@ -793,8 +816,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := executionResultModel(routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		releaseStreamSlot, errWait := m.waitProviderRateLimit(ctx, auth, provider, true)
+		if errWait != nil {
+			return nil, errWait
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, opts)
 		if errStream != nil {
+			if releaseStreamSlot != nil {
+				releaseStreamSlot()
+			}
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
@@ -819,6 +849,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 
 		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, opts, streamResult.Chunks)
 		if bootstrapErr != nil {
+			if releaseStreamSlot != nil {
+				releaseStreamSlot()
+			}
 			if errCtx := ctx.Err(); errCtx != nil {
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
@@ -857,6 +890,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && !streamBootstrapBufferedStarted(opts, buffered) {
+			if releaseStreamSlot != nil {
+				releaseStreamSlot()
+			}
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			if errRecord := m.markResult(ctx, result); errRecord != nil {
@@ -875,7 +911,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining, releaseStreamSlot), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}
@@ -1311,6 +1347,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, false); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
@@ -1393,6 +1432,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, false); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
 			if errExec != nil {
@@ -2032,9 +2074,11 @@ func (m *Manager) markResult(ctx context.Context, result Result) error {
 	clearModelQuota := false
 	setModelQuota := false
 	var authSnapshot *Auth
+	var rateLimitAuth *Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
+		rateLimitAuth = auth.Clone()
 		now := time.Now()
 
 		if result.Success {
@@ -2155,6 +2199,10 @@ func (m *Manager) markResult(ctx context.Context, result Result) error {
 	if authSnapshot != nil {
 		m.recordCircuitBreakerFromResult(authSnapshot, result)
 	}
+	if rateLimitAuth == nil {
+		rateLimitAuth = &Auth{ID: result.AuthID, Provider: result.Provider}
+	}
+	m.notifyProviderRateLimitResult(rateLimitAuth, result.Provider, result)
 
 	m.hook.OnResult(ctx, result)
 	return nil
@@ -2374,6 +2422,27 @@ func retryAfterFromError(err error) *time.Duration {
 		return nil
 	}
 	return new(*retryAfter)
+}
+
+func retryAfterFromHTTPResponse(resp *http.Response) *time.Duration {
+	if resp == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		delay := time.Duration(secs) * time.Second
+		return &delay
+	}
+	if t, err := http.ParseTime(raw); err == nil {
+		delay := time.Until(t)
+		if delay > 0 {
+			return &delay
+		}
+	}
+	return nil
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -3558,5 +3627,25 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	if _, errWait := m.waitProviderRateLimit(ctx, auth, providerKey, false); errWait != nil {
+		return nil, errWait
+	}
+	resp, errExec := exec.HttpRequest(ctx, auth, req)
+	if errExec != nil {
+		return nil, errExec
+	}
+	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		result := Result{
+			AuthID:   auth.ID,
+			Provider: providerKey,
+			Success:  false,
+			Error: &Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    "http request rate limited",
+			},
+			RetryAfter: retryAfterFromHTTPResponse(resp),
+		}
+		m.notifyProviderRateLimitResult(auth, providerKey, result)
+	}
+	return resp, nil
 }

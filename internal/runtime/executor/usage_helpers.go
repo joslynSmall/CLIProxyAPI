@@ -143,6 +143,38 @@ func resolveFailureStage(err error) string {
 	return "request_execution"
 }
 
+type upstreamErrorCoder interface {
+	ErrorCode() string
+}
+
+type statusCoder interface {
+	StatusCode() int
+}
+
+func extractUpstreamErrorCode(body []byte, preferStatus bool) string {
+	if len(body) == 0 {
+		return ""
+	}
+	paths := []string{"error.code", "error.type", "error.status"}
+	if preferStatus {
+		paths = []string{"error.status", "error.code", "error.type"}
+	}
+	for _, path := range paths {
+		if value := normalizedErrorCodeValue(gjson.GetBytes(body, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizedErrorCodeValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ToLower(trimmed)
+}
+
 func resolveErrorFields(err error) (code, message string, status int) {
 	if err == nil {
 		return "", "", 0
@@ -157,12 +189,17 @@ func resolveErrorFields(err error) (code, message string, status int) {
 		}
 		return code, message, status
 	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+	var errCodeProvider upstreamErrorCoder
+	if errors.As(err, &errCodeProvider) && errCodeProvider != nil {
+		code = strings.TrimSpace(errCodeProvider.ErrorCode())
+	}
+	var se statusCoder
+	if errors.As(err, &se) && se != nil {
 		if value := se.StatusCode(); value > 0 {
 			status = value
 		}
 	}
-	return "", strings.TrimSpace(err.Error()), status
+	return code, strings.TrimSpace(err.Error()), status
 }
 
 func (r *usageReporter) latency() time.Duration {

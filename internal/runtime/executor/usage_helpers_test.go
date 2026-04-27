@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,5 +113,74 @@ func TestUsageReporterBuildRecordIncludesAttemptSummary(t *testing.T) {
 	}
 	if len(record.UpstreamRequestIDs) != 3 || record.UpstreamRequestIDs[0] != "up-1" || record.UpstreamRequestIDs[1] != "up-2" || record.UpstreamRequestIDs[2] != "up-3" {
 		t.Fatalf("upstream_request_ids = %#v, want [up-1 up-2 up-3]", record.UpstreamRequestIDs)
+	}
+}
+
+func TestExtractUpstreamErrorCode(t *testing.T) {
+	t.Run("prefer code by default", func(t *testing.T) {
+		body := []byte(`{"error":{"code":"rate_limit_exceeded","status":"RESOURCE_EXHAUSTED"}}`)
+		got := extractUpstreamErrorCode(body, false)
+		if got != "rate_limit_exceeded" {
+			t.Fatalf("error_code = %q, want %q", got, "rate_limit_exceeded")
+		}
+	})
+
+	t.Run("prefer status for google style", func(t *testing.T) {
+		body := []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`)
+		got := extractUpstreamErrorCode(body, true)
+		if got != "resource_exhausted" {
+			t.Fatalf("error_code = %q, want %q", got, "resource_exhausted")
+		}
+	})
+
+	t.Run("fallback to error type", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached"}}`)
+		got := extractUpstreamErrorCode(body, false)
+		if got != "usage_limit_reached" {
+			t.Fatalf("error_code = %q, want %q", got, "usage_limit_reached")
+		}
+	})
+
+	t.Run("non json returns empty", func(t *testing.T) {
+		got := extractUpstreamErrorCode([]byte("not json"), false)
+		if got != "" {
+			t.Fatalf("error_code = %q, want empty", got)
+		}
+	})
+}
+
+func TestResolveErrorFieldsFromStatusErr(t *testing.T) {
+	code, message, status := resolveErrorFields(statusErr{
+		code:    429,
+		msg:     "rate limited",
+		errCode: "rate_limit_exceeded",
+	})
+	if code != "rate_limit_exceeded" {
+		t.Fatalf("code = %q, want %q", code, "rate_limit_exceeded")
+	}
+	if status != 429 {
+		t.Fatalf("status = %d, want 429", status)
+	}
+	if message != "rate limited" {
+		t.Fatalf("message = %q, want %q", message, "rate limited")
+	}
+}
+
+func TestResolveErrorFieldsFromWrappedStatusErr(t *testing.T) {
+	wrapped := fmt.Errorf("wrapper: %w", statusErr{
+		code:    502,
+		msg:     "upstream bad gateway",
+		errCode: "bad_gateway",
+	})
+
+	code, message, status := resolveErrorFields(wrapped)
+	if code != "bad_gateway" {
+		t.Fatalf("code = %q, want %q", code, "bad_gateway")
+	}
+	if status != 502 {
+		t.Fatalf("status = %d, want 502", status)
+	}
+	if !strings.Contains(message, "wrapper: upstream bad gateway") {
+		t.Fatalf("message = %q, want contains wrapped text", message)
 	}
 }

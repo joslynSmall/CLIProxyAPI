@@ -1,0 +1,420 @@
+host: "0.0.0.0"
+port: 18318
+auth-dir: "auths"
+proxy-url: "socks5h://proxyhk:Q4s1tfXJlucQn6CW3vj_gtyB@127.0.0.1:7890"
+api-key-entries:
+  - api-key: quotio-local-1E1D3E21-4352-4C8B-BAAF-3D5872526952
+  - api-key: sk-H43s38wVhUl7q8VXzOOhUPDMmXb1PjN1
+  - api-key: sk-PSFvERPe0KggMsIXxR70OfnonvwGWsUX
+  - api-key: sk-zLxXB1RfaT7gALQCA
+remote-management:
+  allow-remote: true
+  secret-key: "$2a$10$mPQytKs4o0eZonQamOdDuexoQVvv4UfZNV/MpduFW8l94xDW23lG6"
+  disable-auto-update-panel: true
+  panel-github-repository: "https://github.com/joslynSmall/Cli-Proxy-API-Management-Center"
+routing:
+  strategy: "round-robin"
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+request-retry: 10
+request-budget-seconds: 180
+max-retry-credentials: 5
+max-retry-interval: 180
+provider-rate-limit:
+  enabled: true
+  scope: credential
+  rate-limit: 40
+  rate-window-seconds: 60
+  max-stream-concurrency: 5
+  reactive-base-delay-ms: 1000
+  reactive-max-delay-seconds: 60
+  reactive-jitter-ms: 300
+default-reasoning-on-ingress-by-format:
+  claude:
+    policy: missing_only
+    mode: adaptive_effort
+    value: high
+  gemini:
+    policy: missing_only
+    mode: level
+    value: medium
+  openai:
+    policy: missing_only
+    mode: effort
+    value: high
+debug: true
+request-log: true
+usage-statistics-enabled: true
+codex-api-key:
+  - api-key: sk-7f52d3a570685f76a985575e16f4c13ec152794f5f57dcb24204be562a2ddc2c
+    base-url: https://daidai.rxwysystem.com/v1
+    proxy-url: ""
+    models:
+      - name: deepseek-reasoner-search
+        alias: deepseek-v3.2
+      - name: gpt-5.2
+        alias: ""
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.3-codex-spark
+        alias: ""
+      - name: gpt-5.4
+        alias: ""
+      - name: gpt-5.2-codex
+        alias: ""
+      - name: gpt-5.4-mini
+        alias: ""
+    websockets: true
+    excluded-models:
+      - '*'
+  - api-key: sk-NYL0yZ7l3j8jNiaSV34x3FuFiygiARHXHR2y3KxMq6wEC8X0
+    base-url: https://code.jiexi6.cn/v1
+    proxy-url: ""
+    models:
+      - name: gpt-5.2
+      - name: gpt-5.3-codex
+      - name: gpt-5.4
+    excluded-models:
+      - '*'
+  - api-key: ah-5e25f6794d9aa47e0d25bdaba904860000539d56b96a915e34093a03ff24eca5
+    base-url: https://hub.oaifree.com
+    proxy-url: ""
+    models:
+      - name: gpt-5.4
+        alias: ""
+      - name: gpt-5.2
+        alias: ""
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.4-mini
+        alias: ""
+    excluded-models:
+      - '*'
+  - api-key: sk-d4d6af554b42c6c80265480bd9d851bcb7485ca1f5b870c4bc41f712895d8a27
+    base-url: https://api.457n.com
+    proxy-url: ""
+    models:
+      - name: gpt-5.2
+        alias: ""
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.4
+        alias: ""
+      - name: gpt-5.4-mini
+        alias: ""
+      - name: gpt-5.5
+        alias: ""
+    circuit-breaker-failure-threshold: 3
+    circuit-breaker-recovery-timeout: 1800
+    priority: 100
+  - api-key: sk-fqyab2-ldhub2026!diy0424
+    base-url: https://yukig.de5.net/v1
+    proxy-url: ""
+    models:
+      - name: gpt-5.2
+        alias: ""
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.4-mini
+        alias: ""
+    circuit-breaker-failure-threshold: 3
+    circuit-breaker-recovery-timeout: 1800
+    priority: 103
+    websockets: true
+  - api-key: sk-7vhdo784nZ8zcc9rRA07XwaKXbHkFAZokqR5NGpe9V2e1QBm
+    priority: 112
+    base-url: https://qianai.fun/v1
+    proxy-url: ""
+    models:
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.4
+        alias: ""
+    circuit-breaker-failure-threshold: 4
+    circuit-breaker-recovery-timeout: 1800
+  - api-key: sk-jfBc51ru0PcFeJWdeyWxUJtciODIxipkF05NUOITMaFfX1E5
+    priority: 10011
+    base-url: https://a-ocnfniawgw.cn-shanghai.fcapp.run/v1
+    proxy-url: ""
+    models:
+      - name: gemini-2.5-pro
+        alias: ""
+      - name: gpt-5.3-codex
+        alias: ""
+    circuit-breaker-failure-threshold: 3
+    circuit-breaker-recovery-timeout: 1800
+  - api-key: sk-BAqPSE8wZ2dhVvaUhO1bnoTBuyiEDRab57mCzVqQf6IjmmEd
+    base-url: https://api.00325.xyz/v1
+    proxy-url: ""
+    models:
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.4
+        alias: ""
+      - name: gpt-5.5
+        alias: ""
+    circuit-breaker-failure-threshold: 3
+    circuit-breaker-recovery-timeout: 1800
+openai-compatibility:
+  - name: "us-ci"
+    base-url: "https://openai.api-test.us.ci/v1"
+    api-key-entries:
+      - api-key: "sk-aCMa3bwGtG5qS4o4JgWLp5kOemAN09Qe1n8SWuNkFXM6XWdP"
+    models:
+      - name: GLM-5.1
+        alias: ""
+      - name: Kimi-K2.5
+        alias: ""
+      - name: qwen3.6-max-preview
+        alias: "Qwen3.6-Max"
+      - name: GLM-5.1(nsfw)
+        alias: GLM-5.1
+      - name: GLM-5.1-thinking
+        alias: GLM-5.1
+      - name: GLM-5.1-thinking-search
+        alias: GLM-5.1
+      - name: MiniMax-M2.5
+        alias: ""
+      - name: qwen3.6-plus-2026-04-02
+        alias: Qwen3.6-Plus
+  - name: ark
+    base-url: https://windhub.cc/v1
+    api-key-entries:
+      - api-key: sk-ZbmjYBxqoiqe8s0sEYQpWrfPzIg6Tfo1N6v0EbocEC4DfuVI
+      - api-key: sk-9OKhLMlv4b31rL5UM6ggSUVclLAivNAPBl4BiLuV5SNk8lH9
+    models:
+      - name: deepseek-v3-2-251201
+        alias: "DeepSeek-V3.2"
+      - name: glm-5.1
+        alias: GLM-5.1
+      - name: grok-4.20-beta
+        alias: ""
+      - name: kimi-k2.5
+        alias: Kimi-K2.5
+      - name: doubao-seed-2-0-pro-260215
+        alias: ""
+      - name: gpt-5.4
+        alias: ""
+      - name: gpt-5.3-codex
+        alias: ""
+      - name: gpt-5.2
+        alias: ""
+  - name: 百度千帆
+    base-url: https://qianfan.baidubce.com/v2/coding
+    api-key-entries:
+      - api-key: bce-v3/ALTAKSP-f5dZc3ndJHYbxrDCZiV0U/621c8c0f42e4e93b6b89a37d93f7e3ebc469b7a1
+    models:
+      - name: deepseek-v3.2
+        alias: "DeepSeek-V3.2"
+      - name: deepseek-v3.2-think
+        alias: "DeepSeek-V3.2"
+      - name: kimi-k2.5
+        alias: "Kimi-K2.5"
+      - name: glm-5.1
+        alias: GLM-5.1
+      - name: glm-5
+        alias: GLM-5
+      - name: minimax-m2.5
+        alias: MiniMax-M2.5
+      - name: qwen3-embedding-4b
+        alias: Qwen3-Embedding-4B
+    priority: 1
+  - name: abrdns
+    base-url: https://new-api.abrdns.com/v1
+    api-key-entries:
+      - api-key: sk-aCMa3bwGtG5qS4o4JgWLp5kOemAN09Qe1n8SWuNkFXM6XWdP
+    models:
+      - name: DeepSeek-V3.2
+        alias: ""
+      - name: GLM-5.1
+        alias: ""
+      - name: Kimi-K2.5
+        alias: ""
+      - name: MiniMax-M2.5
+        alias: ""
+      - name: MiniMax-M2.7
+        alias: ""
+      - name: qwen3.6-max-preview
+        alias: "Qwen3.6-Max"
+      - name: qwen3.6-plus-2026-04-02
+        alias: "Qwen3.6-Plus"
+  - name: subopen
+    priority: 10
+    base-url: https://hub.linux.do/v1
+    api-key-entries:
+      - api-key: ah-d59de0473a7fd2b30c996f08f2a41649e7acb0fd6758bf8883b8a38a3fb5922a
+    models:
+      - name: glm-5-turbo
+        alias: ""
+      - name: glm-5.1
+        alias: GLM-5.1
+      - name: glm5.1
+        alias: GLM-5.1
+      - name: glm-5
+        alias: GLM-5
+  - name: linnuxdofenxiangaliplan
+    base-url: https://coding.dashscope.aliyuncs.com/v1
+    api-key-entries:
+      - api-key: sk-sp-d95dc4c127ec468ab420a0b2697de2d1
+    models:
+      - name: glm-5
+        alias: ""
+  - name: Joverna
+    base-url: https://jiuuij.de5.net/v1
+    api-key-entries:
+      - api-key: sk-9pEFzCiJqCS37LWK8pzVh6AUGGlxaljpzn41dZfl3CQIfKiU
+    models:
+      - name: DeepSeek-V3.2
+        alias: ""
+      - name: GLM-5.1
+        alias: ""
+      - name: Kimi-K2.5
+        alias: ""
+      - name: MiniMax-M2.7
+        alias: ""
+      - name: Qwen3.6-Max-Preview
+        alias: "Qwen3.6-Max"
+      - name: Qwen3.6-Plus
+        alias: ""
+      - name: DeepSeek-V4-lite
+        alias: ""
+      - name: Kimi-K2.5
+        alias: gpt-5.4-mini
+  - name: 红狐入梦
+    base-url: https://api.picfix.pro/v1
+    api-key-entries:
+      - api-key: sk-lK8CPlpzNtwyt3xfSVvZiAVQ8malt2NxUuUeItasexU8VF1l
+    models:
+      - name: mimo-v2.5-pro
+        alias: ""
+      - name: qwen3.6-plus
+        alias: "Qwen3.6-Plus"
+      - name: glm-5.1
+        alias: "GLM-5.1"
+      - name: kimi-k2.6
+        alias: "Kimi-K2.6"
+  - name: modelscope
+    base-url: https://api-inference.modelscope.cn/v1
+    api-key-entries:
+      - api-key: ms-bdaccfe0-6ac7-40fa-8ee3-6e8dc5b747ad
+    models:
+      - name: ZhipuAI/GLM-5
+        alias: "GLM-5"
+      - name: ZhipuAI/GLM-5.1
+        alias: "GLM-5.1"
+      - name: moonshotai/Kimi-K2.5
+        alias: "Kimi-K2.5"
+      - name: MiniMax/MiniMax-M2.7
+        alias: "MiniMax-M2.7"
+      - name: MiniMax/MiniMax-M2.5
+        alias: "MiniMax-M2.5"
+      - name: deepseek-ai/DeepSeek-V3.2
+        alias: "DeepSeek-V3.2"
+  - name: dgbmc
+    base-url: https://freeapi.dgbmc.top/v1
+    api-key-entries:
+      - api-key: sk-XlB0qTlO1LnqWFdm17XxQcs2cpb7QLt1Se6S6NJ9tBa7UZlI
+    models:
+      - name: grok-4.20-auto
+        alias: "grok-4.20-beta"
+      - name: minimaxai/minimax-m2.7
+        alias: "MiniMax-M2.7"
+      - name: moonshotai/kimi-k2-instruct
+        alias: "Kimi-K2-Instruct"
+      - name: moonshotai/kimi-k2-thinking
+        alias: "Kimi-K2-Thinking"
+      - name: moonshotai/kimi-k2.5
+        alias: "Kimi-K2.5"
+      - name: Qwen3.6-Max-Preview-thinking
+        alias: Qwen3.6-Max
+      - name: Qwen3.6-Plus
+        alias: ""
+      - name: z-ai/glm5
+        alias: "GLM-5"
+      - name: Qwen3.6-Plus-search
+        alias: "Qwen3.6-Plus"
+  - name: N卡
+    base-url: https://integrate.api.nvidia.com/v1
+    api-key-entries:
+      - api-key: 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
+    models:
+      - name: deepseek-ai/deepseek-v3.2
+        alias: "DeepSeek-V3.2"
+      - name: minimaxai/minimax-m2.5
+        alias: "MiniMax-M2.5"
+      - name: minimaxai/minimax-m2.7
+        alias: "MiniMax-M2.7"
+      - name: moonshotai/kimi-k2-instruct
+        alias: "Kimi-K2-Instruct"
+      - name: moonshotai/kimi-k2-instruct-0905
+        alias: "Kimi-K2-Instruct-0905"
+      - name: moonshotai/kimi-k2-thinking
+        alias: "Kimi-K2-Thinking"
+      - name: moonshotai/kimi-k2.5
+        alias: "Kimi-K2.5"
+      - name: z-ai/glm-5.1
+        alias: "GLM-5.1"
+      - name: z-ai/glm4.7
+        alias: "GLM-4.7"
+      - name: z-ai/glm5
+        alias: "GLM-5"
+      - name: deepseek-ai/deepseek-v4-pro
+        alias: DeepSeek-V4-Pro
+      - name: deepseek-ai/deepseek-v4-flash
+        alias: DeepSeek-V4-Flash
+      - name: qwen/qwen3.5-397b-a17b
+        alias: 千问3.5-397B-A17B
+      - name: google/gemma-4-31b-it
+        alias: gemma-4-31B-it
+    priority: 1
+  - name: L站福利
+    priority: 11
+    base-url: https://api.zhenhaoji.qzz.io/v1
+    api-key-entries:
+      - api-key: sk-jwpS8HKMJfPsQZBp1mC4MfoUp5rs904Ft9m2AaYTkMQKxx5W
+    models:
+      - name: claude-opus-4-6
+        alias: "gpt-5.4"
+      - name: claude-opus-4-7
+        alias: ""
+      - name: minimax-m2.7
+        alias: "MiniMax-M2.7"
+  - name: "00000"
+    priority: 112
+    base-url: https://api.00000.mom/v1
+    api-key-entries:
+      - api-key: sk-9AMdakAhwd20yvqOj50ENggAY2ilUR1khlkK2P3yzFvQuNKH
+    models:
+      - name: gpt-5.3-codex-spark
+        alias: gpt-5.3-codex
+claude-api-key:
+  - api-key: sk-jfBc51ru0PcFeJWdeyWxUJtciODIxipkF05NUOITMaFfX1E5
+    base-url: https://a-ocnfniawgw.cn-shanghai.fcapp.run
+    models:
+      - name: claude-opus-4-7
+      - name: gpt-5.3-codex
+        alias: ""
+    proxy-url: ""
+  - api-key: pk-877e3a57-29d0-4eac-8b42-8ba167827f2b
+    base-url: https://modelservice.jdcloud.com/coding/anthropic
+    proxy-url: ""
+    models:
+      - name: GLM-5
+        alias: ""
+  - api-key: sk-yicgK3RIGJDKtFsKTpJlXF8paT07KhJ6ryTzdt6gPbisrnYJ
+    priority: 111
+    base-url: https://mydamoxing.cn
+    proxy-url: ""
+    models:
+      - name: K2.6
+        alias: "Kimi-K2.6"
+      - name: K2.6-code-preview
+        alias: "Kimi-K2.6"
+      - name: kimi-k2.5
+        alias: "Kimi-K2.5"
+      - name: kimi-k2.5-20260127
+        alias: "Kimi-K2.5"
+circuit-breaker-auto-removal:
+  enabled: true
+  auto-remove-threshold: 5

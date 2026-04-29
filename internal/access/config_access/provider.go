@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/apikeyscope"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -16,33 +17,35 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
-	keys := normalizeKeys(cfg.APIKeys)
-	if len(keys) == 0 {
+	entries := normalizeEntries(cfg)
+	if len(entries) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
 	}
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, entries),
 	)
 }
 
 type provider struct {
 	name string
-	keys map[string]struct{}
+	keys map[string]scopedEntry
 }
 
-func newProvider(name string, keys []string) *provider {
+type scopedEntry struct {
+	allowedSuppliers []string
+	allowedModels    []string
+	scopeSource      string
+}
+
+func newProvider(name string, entries map[string]scopedEntry) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	keySet := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		keySet[key] = struct{}{}
-	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: entries}
 }
 
 func (p *provider) Identifier() string {
@@ -89,15 +92,27 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
-			return &sdkaccess.Result{
-				Provider:  p.Identifier(),
-				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
-			}, nil
+		entry, ok := p.keys[candidate.value]
+		if !ok {
+			continue
 		}
+		metadata := map[string]string{
+			"source": candidate.source,
+		}
+		if entry.scopeSource != "" {
+			metadata[apikeyscope.ScopeSourceMetadataKey] = entry.scopeSource
+		}
+		if encoded := apikeyscope.EncodeScopeValues(entry.allowedSuppliers); encoded != "" {
+			metadata[apikeyscope.ScopeAllowedSuppliersMetadataKey] = encoded
+		}
+		if encoded := apikeyscope.EncodeScopeValues(entry.allowedModels); encoded != "" {
+			metadata[apikeyscope.ScopeAllowedModelsMetadataKey] = encoded
+		}
+		return &sdkaccess.Result{
+			Provider:  p.Identifier(),
+			Principal: candidate.value,
+			Metadata:  metadata,
+		}, nil
 	}
 
 	return nil, sdkaccess.NewInvalidCredentialError()
@@ -117,25 +132,33 @@ func extractBearerToken(header string) string {
 	return strings.TrimSpace(parts[1])
 }
 
-func normalizeKeys(keys []string) []string {
-	if len(keys) == 0 {
+func normalizeEntries(cfg *sdkconfig.SDKConfig) map[string]scopedEntry {
+	if cfg == nil || len(cfg.APIKeyEntries) == 0 {
 		return nil
 	}
-	normalized := make([]string, 0, len(keys))
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		trimmedKey := strings.TrimSpace(key)
-		if trimmedKey == "" {
+	out := make(map[string]scopedEntry, len(cfg.APIKeyEntries))
+	for _, raw := range cfg.APIKeyEntries {
+		key := strings.TrimSpace(raw.APIKey)
+		if key == "" {
 			continue
 		}
-		if _, exists := seen[trimmedKey]; exists {
+		if _, exists := out[key]; exists {
 			continue
 		}
-		seen[trimmedKey] = struct{}{}
-		normalized = append(normalized, trimmedKey)
+
+		suppliers, err := apikeyscope.NormalizeSupplierKeys(raw.AllowedSuppliers)
+		if err != nil {
+			// Invalid supplier input is ignored here to keep auth availability robust.
+			suppliers = nil
+		}
+		out[key] = scopedEntry{
+			allowedSuppliers: suppliers,
+			allowedModels:    apikeyscope.NormalizeModelKeys(raw.AllowedModels),
+			scopeSource:      "api-key-entries",
+		}
 	}
-	if len(normalized) == 0 {
+	if len(out) == 0 {
 		return nil
 	}
-	return normalized
+	return out
 }

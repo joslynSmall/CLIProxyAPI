@@ -35,11 +35,11 @@ remote-management:
 # 认证目录(支持 ~ 表示主目录)
 auth-dir: "~/.cli-proxy-api"
 
-# API 密钥列表(用于认证)
-api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+# API 密钥条目列表(用于认证，可选限制供应商/模型范围)
+api-key-entries:
+  - api-key: "your-api-key-1"
+  - api-key: "your-api-key-2"
+  - api-key: "your-api-key-3"
 
 # 启用调试日志
 debug: false

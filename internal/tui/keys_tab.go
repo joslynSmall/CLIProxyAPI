@@ -15,7 +15,7 @@ import (
 type keysTabModel struct {
 	client   *Client
 	viewport viewport.Model
-	keys     []string
+	keys     []APIKeyEntry
 	gemini   []map[string]any
 	claude   []map[string]any
 	codex    []map[string]any
@@ -37,13 +37,13 @@ type keysTabModel struct {
 }
 
 type keysDataMsg struct {
-	apiKeys []string
-	gemini  []map[string]any
-	claude  []map[string]any
-	codex   []map[string]any
-	vertex  []map[string]any
-	openai  []map[string]any
-	err     error
+	apiKeyEntries []APIKeyEntry
+	gemini        []map[string]any
+	claude        []map[string]any
+	codex         []map[string]any
+	vertex        []map[string]any
+	openai        []map[string]any
+	err           error
 }
 
 type keyActionMsg struct {
@@ -68,12 +68,12 @@ func (m keysTabModel) Init() tea.Cmd {
 
 func (m keysTabModel) fetchKeys() tea.Msg {
 	result := keysDataMsg{}
-	apiKeys, err := m.client.GetAPIKeys()
+	apiKeyEntries, err := m.client.GetAPIKeyEntries()
 	if err != nil {
 		result.err = err
 		return result
 	}
-	result.apiKeys = apiKeys
+	result.apiKeyEntries = apiKeyEntries
 	result.gemini, _ = m.client.GetGeminiKeys()
 	result.claude, _ = m.client.GetClaudeKeys()
 	result.codex, _ = m.client.GetCodexKeys()
@@ -92,7 +92,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			m.err = msg.err
 		} else {
 			m.err = nil
-			m.keys = msg.apiKeys
+			m.keys = msg.apiKeyEntries
 			m.gemini = msg.gemini
 			m.claude = msg.claude
 			m.codex = msg.codex
@@ -135,7 +135,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				m.editInput.Blur()
 				if isAdding {
 					return m, func() tea.Msg {
-						err := m.client.AddAPIKey(value)
+						err := m.client.AddAPIKeyEntry(value)
 						if err != nil {
 							return keyActionMsg{err: err}
 						}
@@ -143,7 +143,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 					}
 				}
 				return m, func() tea.Msg {
-					err := m.client.EditAPIKey(editIdx, value)
+					err := m.client.EditAPIKeyEntry(editIdx, value)
 					if err != nil {
 						return keyActionMsg{err: err}
 					}
@@ -170,7 +170,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				idx := m.confirm
 				m.confirm = -1
 				return m, func() tea.Msg {
-					err := m.client.DeleteAPIKey(idx)
+					err := m.client.DeleteAPIKeyEntry(idx)
 					if err != nil {
 						return keyActionMsg{err: err}
 					}
@@ -213,7 +213,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				m.editing = true
 				m.adding = false
 				m.editIdx = m.cursor
-				m.editInput.SetValue(m.keys[m.cursor])
+				m.editInput.SetValue(m.keys[m.cursor].APIKey)
 				m.editInput.Prompt = T("edit_key_prompt")
 				m.editInput.Focus()
 				m.viewport.SetContent(m.renderContent())
@@ -231,7 +231,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			// Copy selected key to clipboard
 			if m.cursor < len(m.keys) {
 				key := m.keys[m.cursor]
-				if err := clipboard.WriteAll(key); err != nil {
+				if err := clipboard.WriteAll(key.APIKey); err != nil {
 					m.status = errorStyle.Render(T("copy_failed") + ": " + err.Error())
 				} else {
 					m.status = successStyle.Render(T("copied"))
@@ -308,13 +308,13 @@ func (m keysTabModel) renderContent() string {
 			rowStyle = lipgloss.NewStyle().Bold(true)
 		}
 
-		row := fmt.Sprintf("%s%d. %s", cursor, i+1, maskKey(key))
+		row := fmt.Sprintf("%s%d. %s", cursor, i+1, maskKey(key.APIKey))
 		sb.WriteString(rowStyle.Render(row))
 		sb.WriteString("\n")
 
 		// Delete confirmation
 		if m.confirm == i {
-			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete_key"), maskKey(key))))
+			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete_key"), maskKey(key.APIKey))))
 			sb.WriteString("\n")
 		}
 

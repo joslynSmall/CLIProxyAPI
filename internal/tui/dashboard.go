@@ -24,14 +24,14 @@ type dashboardModel struct {
 	lastConfig    map[string]any
 	lastUsage     map[string]any
 	lastAuthFiles []map[string]any
-	lastAPIKeys   []string
+	lastAPIKeys   []APIKeyEntry
 }
 
 type dashboardDataMsg struct {
 	config    map[string]any
 	usage     map[string]any
 	authFiles []map[string]any
-	apiKeys   []string
+	apiKeys   []APIKeyEntry
 	err       error
 }
 
@@ -49,7 +49,7 @@ func (m dashboardModel) fetchData() tea.Msg {
 	cfg, cfgErr := m.client.GetConfig()
 	usage, usageErr := m.client.GetUsage()
 	authFiles, authErr := m.client.GetAuthFiles()
-	apiKeys, keysErr := m.client.GetAPIKeys()
+	apiKeys, keysErr := m.client.GetAPIKeyEntries()
 
 	var err error
 	for _, e := range []error{cfgErr, usageErr, authErr, keysErr} {
@@ -121,7 +121,7 @@ func (m dashboardModel) View() string {
 	return m.viewport.View()
 }
 
-func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []map[string]any, apiKeys []string) string {
+func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []map[string]any, apiKeys []APIKeyEntry) string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render(T("dashboard_title")))

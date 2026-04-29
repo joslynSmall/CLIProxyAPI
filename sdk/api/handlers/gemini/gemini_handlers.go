@@ -49,6 +49,7 @@ func (h *GeminiAPIHandler) Models() []map[string]any {
 // It returns a JSON response containing available Gemini models and their specifications.
 func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 	rawModels := h.Models()
+	rawModels = h.FilterModelsByAccessScope(c, rawModels)
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {

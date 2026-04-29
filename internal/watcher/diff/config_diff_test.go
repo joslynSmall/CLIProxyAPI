@@ -190,7 +190,9 @@ func TestBuildConfigChangeDetails_NilSafe(t *testing.T) {
 func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	oldCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a"},
+			APIKeyEntries: []config.APIKeyEntry{
+				{APIKey: "a"},
+			},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "",
@@ -201,7 +203,11 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	}
 	newCfg := &config.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"a", "b", "c"},
+			APIKeyEntries: []config.APIKeyEntry{
+				{APIKey: "a"},
+				{APIKey: "b"},
+				{APIKey: "c"},
+			},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamAPIKey: "new-key",
@@ -212,7 +218,7 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	}
 
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
-	expectContains(t, details, "api-keys count: 1 -> 3")
+	expectContains(t, details, "api-key-entries count: 1 -> 3")
 	expectContains(t, details, "ampcode.upstream-api-key: added")
 	expectContains(t, details, "remote-management.secret-key: created")
 }
@@ -237,7 +243,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
-			APIKeys:                    []string{"key-1"},
+			APIKeyEntries:              []config.APIKeyEntry{{APIKey: "key-1"}},
 			ForceModelPrefix:           false,
 			NonStreamKeepAliveInterval: 0,
 		},
@@ -276,7 +282,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 true,
 			ProxyURL:                   "http://new-proxy",
-			APIKeys:                    []string{" key-1 ", "key-2"},
+			APIKeyEntries:              []config.APIKeyEntry{{APIKey: " key-1 "}, {APIKey: "key-2"}},
 			ForceModelPrefix:           true,
 			NonStreamKeepAliveInterval: 5,
 		},
@@ -297,7 +303,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "nonstream-keepalive-interval: 0 -> 5")
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
-	expectContains(t, details, "api-keys count: 1 -> 2")
+	expectContains(t, details, "api-key-entries count: 1 -> 2")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
 	expectContains(t, details, "ampcode.restrict-management-to-localhost: false -> true")
@@ -350,7 +356,9 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: false,
 			ProxyURL:   "http://old-proxy",
-			APIKeys:    []string{" keyA "},
+			APIKeyEntries: []config.APIKeyEntry{
+				{APIKey: " keyA "},
+			},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"a"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -404,7 +412,9 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog: true,
 			ProxyURL:   "http://new-proxy",
-			APIKeys:    []string{"keyB"},
+			APIKeyEntries: []config.APIKeyEntry{
+				{APIKey: "keyB"},
+			},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"b", "c"}, "p2": {"d"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -437,7 +447,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "ws-auth: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-preview-model: false -> true")
-	expectContains(t, changes, "api-keys: values updated (count unchanged, redacted)")
+	expectContains(t, changes, "api-key-entries: values updated (count unchanged, redacted)")
 	expectContains(t, changes, "gemini[0].base-url: http://g-old -> http://g-new")
 	expectContains(t, changes, "gemini[0].proxy-url: http://gp-old -> http://gp-new")
 	expectContains(t, changes, "gemini[0].api-key: updated")
@@ -538,9 +548,13 @@ func TestBuildConfigChangeDetails_CountBranches(t *testing.T) {
 	expectContains(t, changes, "vertex-api-key count: 0 -> 1")
 }
 
-func TestTrimStrings(t *testing.T) {
-	out := trimStrings([]string{" a ", "b", "  c"})
-	if len(out) != 3 || out[0] != "a" || out[1] != "b" || out[2] != "c" {
-		t.Fatalf("unexpected trimmed strings: %v", out)
+func TestNormalizeAPIKeyEntriesForDiff(t *testing.T) {
+	out := normalizeAPIKeyEntriesForDiff([]config.APIKeyEntry{
+		{APIKey: " a "},
+		{APIKey: "a"},
+		{APIKey: "b"},
+	})
+	if len(out) != 2 || out[0].APIKey != "a" || out[1].APIKey != "b" {
+		t.Fatalf("unexpected normalized entries: %#v", out)
 	}
 }

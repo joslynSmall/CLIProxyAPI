@@ -440,7 +440,7 @@ type AmpCode struct {
 	// UpstreamAPIKey optionally overrides the Authorization header when proxying Amp upstream calls.
 	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
 
-	// UpstreamAPIKeys maps client API keys (from top-level api-keys) to upstream API keys.
+	// UpstreamAPIKeys maps client API keys (from top-level api-key-entries[].api-key) to upstream API keys.
 	// When a client authenticates with a key that matches an entry, that upstream key is used.
 	// If no match is found, falls back to UpstreamAPIKey (default behavior).
 	UpstreamAPIKeys []AmpUpstreamAPIKeyEntry `yaml:"upstream-api-keys,omitempty" json:"upstream-api-keys,omitempty"`
@@ -467,7 +467,7 @@ type AmpUpstreamAPIKeyEntry struct {
 	// UpstreamAPIKey is the API key to use when proxying to the Amp upstream.
 	UpstreamAPIKey string `yaml:"upstream-api-key" json:"upstream-api-key"`
 
-	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
+	// APIKeys are the client API keys (from top-level api-key-entries[].api-key) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 }
 
@@ -905,6 +905,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("invalid default-reasoning-on-ingress-by-format: %w", errDefaults)
 	}
 	cfg.DefaultReasoningOnIngressByFormat = normalizedDefaults
+
+	// Normalize top-level API key entries and maintain legacy field compatibility.
+	cfg.SanitizeAPIKeyEntries()
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()

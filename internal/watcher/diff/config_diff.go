@@ -85,11 +85,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}
 
-	// API keys (redacted) and counts
-	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
-		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
-		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
+	// API key entries (redacted) and counts
+	oldAPIKeyEntries := normalizeAPIKeyEntriesForDiff(oldCfg.APIKeyEntries)
+	newAPIKeyEntries := normalizeAPIKeyEntriesForDiff(newCfg.APIKeyEntries)
+	if len(oldAPIKeyEntries) != len(newAPIKeyEntries) {
+		changes = append(changes, fmt.Sprintf("api-key-entries count: %d -> %d", len(oldAPIKeyEntries), len(newAPIKeyEntries)))
+	} else if !reflect.DeepEqual(oldAPIKeyEntries, newAPIKeyEntries) {
+		changes = append(changes, "api-key-entries: values updated (count unchanged, redacted)")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
 		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
@@ -321,12 +323,8 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	return changes
 }
 
-func trimStrings(in []string) []string {
-	out := make([]string, len(in))
-	for i := range in {
-		out[i] = strings.TrimSpace(in[i])
-	}
-	return out
+func normalizeAPIKeyEntriesForDiff(entries []config.APIKeyEntry) []config.APIKeyEntry {
+	return config.NormalizeAPIKeyEntries(entries)
 }
 
 func equalStringMap(a, b map[string]string) bool {

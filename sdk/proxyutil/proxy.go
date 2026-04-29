@@ -57,8 +57,8 @@ func Parse(raw string) (Setting, error) {
 		return setting, fmt.Errorf("proxy URL missing scheme/host")
 	}
 
-	switch parsedURL.Scheme {
-	case "socks5", "http", "https":
+	switch strings.ToLower(parsedURL.Scheme) {
+	case "socks5", "socks5h", "http", "https":
 		setting.Mode = ModeProxy
 		setting.URL = parsedURL
 		return setting, nil
@@ -95,7 +95,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 	case ModeDirect:
 		return NewDirectTransport(), setting.Mode, nil
 	case ModeProxy:
-		if setting.URL.Scheme == "socks5" {
+		if strings.EqualFold(setting.URL.Scheme, "socks5") || strings.EqualFold(setting.URL.Scheme, "socks5h") {
 			var proxyAuth *proxy.Auth
 			if setting.URL.User != nil {
 				username := setting.URL.User.Username()
@@ -134,7 +134,13 @@ func BuildDialer(raw string) (proxy.Dialer, Mode, error) {
 	case ModeDirect:
 		return proxy.Direct, setting.Mode, nil
 	case ModeProxy:
-		dialer, errDialer := proxy.FromURL(setting.URL, proxy.Direct)
+		proxyURL := setting.URL
+		if strings.EqualFold(proxyURL.Scheme, "socks5h") {
+			normalized := *proxyURL
+			normalized.Scheme = "socks5"
+			proxyURL = &normalized
+		}
+		dialer, errDialer := proxy.FromURL(proxyURL, proxy.Direct)
 		if errDialer != nil {
 			return nil, setting.Mode, fmt.Errorf("create proxy dialer failed: %w", errDialer)
 		}

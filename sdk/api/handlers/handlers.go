@@ -943,7 +943,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 				addon = hdr.Clone()
 			}
 		}
-		publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, status, err)
+		publishHandlerFailureUsage(ctx, h.AuthManager, providers, reqMeta, req.Model, status, err)
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
@@ -1065,7 +1065,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				addon = hdr.Clone()
 			}
 		}
-		publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, status, err)
+		publishHandlerFailureUsage(ctx, h.AuthManager, providers, reqMeta, req.Model, status, err)
 		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		close(errChan)
 		return nil, nil, errChan
@@ -1174,7 +1174,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			if !ok {
 				if handlerType == "openai-response" {
 					if err := validateSSEDataJSONWithCarry(&responsesSSEValidationCarry, nil, true); err != nil {
-						publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, http.StatusBadGateway, err)
+						publishHandlerFailureUsage(ctx, h.AuthManager, providers, reqMeta, req.Model, http.StatusBadGateway, err)
 						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 						return
 					}
@@ -1254,14 +1254,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						addon = hdr.Clone()
 					}
 				}
-				publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, status, streamErr)
+				publishHandlerFailureUsage(ctx, h.AuthManager, providers, reqMeta, req.Model, status, streamErr)
 				_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 				return
 			}
 
 			if len(chunk.Payload) > 0 {
 				if err := failureDetector.Observe(chunk.Payload); err != nil {
-					publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, http.StatusBadGateway, err)
+					publishHandlerFailureUsage(ctx, h.AuthManager, providers, reqMeta, req.Model, http.StatusBadGateway, err)
 					_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 					return
 				}
@@ -1270,7 +1270,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				}
 				if handlerType == "openai-response" {
 					if err := validateSSEDataJSONWithCarry(&responsesSSEValidationCarry, chunk.Payload, false); err != nil {
-						publishHandlerFailureUsage(ctx, strings.Join(providers, ","), req.Model, http.StatusBadGateway, err)
+						publishHandlerFailureUsage(ctx, h.AuthManager, providers, reqMeta, req.Model, http.StatusBadGateway, err)
 						_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
 						return
 					}
@@ -1397,16 +1397,19 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func publishHandlerFailureUsage(ctx context.Context, provider, model string, status int, err error) {
+func publishHandlerFailureUsage(ctx context.Context, authManager *coreauth.Manager, candidateProviders []string, reqMeta map[string]any, model string, status int, err error) {
 	coreusage.MarkRequestFailed(ctx)
 	if coreusage.RecordPublished(ctx) {
 		return
 	}
+	provider, authID, authIndex := resolveHandlerFailureRecordContext(authManager, candidateProviders, reqMeta)
 	errorCode, errorMessage, resolvedStatus := resolveHandlerUsageError(err, status)
 	coreusage.PublishRecord(ctx, coreusage.Record{
 		Provider:      strings.TrimSpace(provider),
 		Model:         strings.TrimSpace(model),
 		APIKey:        handlerAPIKeyFromContext(ctx),
+		AuthID:        authID,
+		AuthIndex:     authIndex,
 		RequestID:     handlerRequestIDFromContext(ctx),
 		RequestLogRef: handlerRequestIDFromContext(ctx),
 		RequestedAt:   time.Now(),
@@ -1429,6 +1432,79 @@ func resolveHandlerFailureStage(err error) string {
 	return "request_execution"
 }
 
+type handlerStatusCoder interface {
+	StatusCode() int
+}
+
+type handlerErrorCoder interface {
+	ErrorCode() string
+}
+
+type handlerErrorBodyProvider interface {
+	Body() []byte
+}
+
+type handlerErrorResponseBodyProvider interface {
+	ResponseBody() []byte
+}
+
+func resolveHandlerFailureRecordContext(authManager *coreauth.Manager, candidateProviders []string, reqMeta map[string]any) (provider, authID, authIndex string) {
+	authID = metadataString(reqMeta, coreexecutor.SelectedAuthMetadataKey)
+	if authID == "" {
+		authID = metadataString(reqMeta, coreexecutor.PinnedAuthMetadataKey)
+	}
+	if authID != "" && authManager != nil {
+		if auth, ok := authManager.GetByID(authID); ok && auth != nil {
+			provider = strings.ToLower(strings.TrimSpace(auth.Provider))
+			authIndex = strings.TrimSpace(auth.EnsureIndex())
+		}
+	}
+	if provider == "" {
+		provider = resolveSingleProviderCandidate(candidateProviders)
+	}
+	return provider, authID, authIndex
+}
+
+func resolveSingleProviderCandidate(candidates []string) string {
+	seen := make(map[string]struct{}, len(candidates))
+	ordered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		normalized := strings.ToLower(strings.TrimSpace(candidate))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		ordered = append(ordered, normalized)
+	}
+	if len(ordered) != 1 {
+		return ""
+	}
+	return ordered[0]
+}
+
+func metadataString(meta map[string]any, key string) string {
+	if len(meta) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch typed := raw.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
+}
+
 func resolveHandlerUsageError(err error, fallbackStatus int) (code, message string, status int) {
 	status = fallbackStatus
 	if err == nil {
@@ -1446,12 +1522,69 @@ func resolveHandlerUsageError(err error, fallbackStatus int) (code, message stri
 		}
 		return code, message, status
 	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+	var codeProvider handlerErrorCoder
+	if errors.As(err, &codeProvider) && codeProvider != nil {
+		code = strings.TrimSpace(codeProvider.ErrorCode())
+	}
+	var se handlerStatusCoder
+	if errors.As(err, &se) && se != nil {
 		if resolved := se.StatusCode(); resolved > 0 {
 			status = resolved
 		}
 	}
-	return "", strings.TrimSpace(err.Error()), status
+	message = strings.TrimSpace(err.Error())
+	if code == "" {
+		preferStatus := status >= http.StatusBadRequest && status < http.StatusInternalServerError
+		if extracted := handlerExtractUpstreamErrorCode(handlerErrorBody(err), preferStatus); extracted != "" {
+			code = extracted
+		}
+	}
+	if code == "" && message != "" && json.Valid([]byte(message)) {
+		preferStatus := status >= http.StatusBadRequest && status < http.StatusInternalServerError
+		if extracted := handlerExtractUpstreamErrorCode([]byte(message), preferStatus); extracted != "" {
+			code = extracted
+		}
+	}
+	return code, message, status
+}
+
+func handlerErrorBody(err error) []byte {
+	if err == nil {
+		return nil
+	}
+	var bodyProvider handlerErrorBodyProvider
+	if errors.As(err, &bodyProvider) && bodyProvider != nil {
+		return bytes.Clone(bodyProvider.Body())
+	}
+	var responseBodyProvider handlerErrorResponseBodyProvider
+	if errors.As(err, &responseBodyProvider) && responseBodyProvider != nil {
+		return bytes.Clone(responseBodyProvider.ResponseBody())
+	}
+	return nil
+}
+
+func handlerExtractUpstreamErrorCode(body []byte, preferStatus bool) string {
+	if len(body) == 0 {
+		return ""
+	}
+	paths := []string{"error.code", "error.type", "error.status"}
+	if preferStatus {
+		paths = []string{"error.status", "error.code", "error.type"}
+	}
+	for _, path := range paths {
+		if value := handlerNormalizedErrorCodeValue(gjson.GetBytes(body, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func handlerNormalizedErrorCodeValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	return strings.ToLower(trimmed)
 }
 
 func handlerAPIKeyFromContext(ctx context.Context) string {

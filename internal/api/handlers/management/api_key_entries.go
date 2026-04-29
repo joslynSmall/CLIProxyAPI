@@ -10,7 +10,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/apikeyscope"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -233,25 +232,6 @@ func collectSupplierOptions(cfg *config.Config, auths []*coreauth.Auth) []string
 	deduped := dedupeStrings(values)
 	sort.Strings(deduped)
 	return deduped
-}
-
-func collectRuntimeModelOptions() []string {
-	models := registry.GetGlobalRegistry().GetAvailableModels("")
-	values := make([]string, 0, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		id, _ := model["id"].(string)
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		values = append(values, id)
-	}
-	values = dedupeStrings(values)
-	sort.Strings(values)
-	return values
 }
 
 func dedupeStrings(values []string) []string {

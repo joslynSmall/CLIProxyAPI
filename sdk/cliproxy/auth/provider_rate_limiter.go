@@ -2,25 +2,33 @@ package auth
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 )
 
 const providerRateLimiterStreamPollInterval = 50 * time.Millisecond
 
 type providerRateLimiterPolicy struct {
-	enabled              bool
-	scope                string
-	rateLimit            int
-	window               time.Duration
-	maxStreamConcurrency int
-	reactiveBaseDelay    time.Duration
-	reactiveMaxDelay     time.Duration
-	reactiveJitter       time.Duration
+	enabled                   bool
+	scope                     string
+	rateLimit                 int
+	adaptiveMaxRateLimit      int
+	window                    time.Duration
+	maxStreamConcurrency      int
+	reactiveBaseDelay         time.Duration
+	reactiveMaxDelay          time.Duration
+	reactiveJitter            time.Duration
+	adaptiveEnabled           bool
+	adaptiveIncreaseOnSuccess bool
+	adaptiveDecreaseFactor    float64
+	adaptiveMinRateLimit      int
+	adaptiveMode              string
 }
 
 type providerRateLimiterBucket struct {
@@ -31,9 +39,10 @@ type providerRateLimiterBucket struct {
 }
 
 type providerRateLimiter struct {
-	mu      sync.Mutex
-	config  internalconfig.ProviderRateLimitConfig
-	buckets map[string]*providerRateLimiterBucket
+	mu            sync.Mutex
+	config        internalconfig.ProviderRateLimitConfig
+	buckets       map[string]*providerRateLimiterBucket
+	configMutator func(func(*internalconfig.ProviderRateLimitConfig) bool)
 }
 
 func newProviderRateLimiter(cfg *internalconfig.Config) *providerRateLimiter {
@@ -59,7 +68,16 @@ func (l *providerRateLimiter) UpdateConfig(cfg *internalconfig.Config) {
 	l.mu.Unlock()
 }
 
-func (l *providerRateLimiter) Wait(ctx context.Context, auth *Auth, provider string, stream bool) (func(), error) {
+func (l *providerRateLimiter) SetConfigMutator(mutator func(func(*internalconfig.ProviderRateLimitConfig) bool)) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.configMutator = mutator
+	l.mu.Unlock()
+}
+
+func (l *providerRateLimiter) Wait(ctx context.Context, auth *Auth, provider, model string, stream bool) (func(), error) {
 	if l == nil {
 		return nil, nil
 	}
@@ -67,7 +85,7 @@ func (l *providerRateLimiter) Wait(ctx context.Context, auth *Auth, provider str
 		ctx = context.Background()
 	}
 	for {
-		wait, release, done := l.tryAcquire(auth, provider, stream)
+		wait, release, done := l.tryAcquire(auth, provider, model, stream)
 		if done {
 			return release, nil
 		}
@@ -84,16 +102,17 @@ func (l *providerRateLimiter) Wait(ctx context.Context, auth *Auth, provider str
 	}
 }
 
-func (l *providerRateLimiter) tryAcquire(auth *Auth, provider string, stream bool) (time.Duration, func(), bool) {
+func (l *providerRateLimiter) tryAcquire(auth *Auth, provider, model string, stream bool) (time.Duration, func(), bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	providerKey := providerRateLimitProviderKey(auth, provider)
-	policy := l.resolvePolicyLocked(auth, providerKey)
+	modelKey := providerRateLimitModelKey(model)
+	policy := l.resolvePolicyLocked(auth, providerKey, modelKey)
 	if !policy.enabled {
 		return 0, nil, true
 	}
-	key, ok := l.scopeKeyLocked(policy, auth, providerKey)
+	key, ok := l.scopeKeyLocked(policy, auth, providerKey, modelKey)
 	if !ok {
 		return 0, nil, true
 	}
@@ -130,19 +149,22 @@ func (l *providerRateLimiter) tryAcquire(auth *Auth, provider string, stream boo
 	return 0, nil, true
 }
 
-func (l *providerRateLimiter) OnResult(auth *Auth, provider string, result Result) {
+func (l *providerRateLimiter) OnResult(auth *Auth, provider, model string, result Result) {
 	if l == nil {
 		return
 	}
 	providerKey := providerRateLimitProviderKey(auth, provider)
+	modelKey := providerRateLimitModelKey(model)
+	var adaptiveUpdate *providerRateLimitAdaptiveUpdate
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	policy := l.resolvePolicyLocked(auth, providerKey)
+	policy := l.resolvePolicyLocked(auth, providerKey, modelKey)
 	if !policy.enabled {
+		l.mu.Unlock()
 		return
 	}
-	key, ok := l.scopeKeyLocked(policy, auth, providerKey)
+	key, ok := l.scopeKeyLocked(policy, auth, providerKey, modelKey)
 	if !ok {
+		l.mu.Unlock()
 		return
 	}
 	bucket := l.bucketLocked(key)
@@ -151,20 +173,50 @@ func (l *providerRateLimiter) OnResult(auth *Auth, provider string, result Resul
 		if !bucket.blockedUntil.After(now) {
 			bucket.backoffAttempt = 0
 		}
+		if policy.adaptiveEnabled &&
+			policy.adaptiveIncreaseOnSuccess &&
+			policy.adaptiveMode != internalconfig.ProviderRateLimitModeManual {
+			if increasedRate := adaptiveIncreasedRateLimit(policy.rateLimit, policy.adaptiveMaxRateLimit); increasedRate > policy.rateLimit {
+				adaptiveUpdate = &providerRateLimitAdaptiveUpdate{
+					provider: providerKey,
+					authID:   providerRateLimitAuthID(auth),
+					model:    modelKey,
+					scope:    policy.scope,
+					rate:     increasedRate,
+				}
+			}
+		}
+		l.mu.Unlock()
+		l.persistAdaptiveUpdate(adaptiveUpdate)
 		return
 	}
 	status := statusCodeFromResult(result.Error)
 	if status != 429 {
+		l.mu.Unlock()
 		return
 	}
 	delay := l.reactiveDelayLocked(bucket, policy, result.RetryAfter)
 	if delay <= 0 {
+		l.mu.Unlock()
 		return
 	}
 	next := now.Add(delay)
 	if next.After(bucket.blockedUntil) {
 		bucket.blockedUntil = next
 	}
+	if policy.adaptiveEnabled && policy.adaptiveMode != internalconfig.ProviderRateLimitModeManual {
+		if decreasedRate := adaptiveDecreasedRateLimit(policy.rateLimit, policy.adaptiveDecreaseFactor, policy.adaptiveMinRateLimit); decreasedRate > 0 && decreasedRate < policy.rateLimit {
+			adaptiveUpdate = &providerRateLimitAdaptiveUpdate{
+				provider: providerKey,
+				authID:   providerRateLimitAuthID(auth),
+				model:    modelKey,
+				scope:    policy.scope,
+				rate:     decreasedRate,
+			}
+		}
+	}
+	l.mu.Unlock()
+	l.persistAdaptiveUpdate(adaptiveUpdate)
 }
 
 func (l *providerRateLimiter) reactiveDelayLocked(
@@ -214,20 +266,26 @@ func (l *providerRateLimiter) reactiveDelayLocked(
 	return delay
 }
 
-func (l *providerRateLimiter) resolvePolicyLocked(auth *Auth, providerKey string) providerRateLimiterPolicy {
+func (l *providerRateLimiter) resolvePolicyLocked(auth *Auth, providerKey, modelKey string) providerRateLimiterPolicy {
 	cfg := l.config
 	policy := providerRateLimiterPolicy{
-		enabled:              cfg.EnabledOrDefault(),
-		scope:                cfg.Scope,
-		rateLimit:            cfg.RateLimit,
-		window:               time.Duration(cfg.RateWindowSeconds) * time.Second,
-		maxStreamConcurrency: cfg.MaxStreamConcurrency,
-		reactiveBaseDelay:    time.Duration(cfg.ReactiveBaseDelayMS) * time.Millisecond,
-		reactiveMaxDelay:     time.Duration(cfg.ReactiveMaxDelaySeconds) * time.Second,
-		reactiveJitter:       time.Duration(cfg.ReactiveJitterMS) * time.Millisecond,
+		enabled:                   cfg.EnabledOrDefault(),
+		scope:                     cfg.Scope,
+		rateLimit:                 cfg.RateLimit,
+		adaptiveMaxRateLimit:      cfg.RateLimit,
+		window:                    time.Duration(cfg.RateWindowSeconds) * time.Second,
+		maxStreamConcurrency:      cfg.MaxStreamConcurrency,
+		reactiveBaseDelay:         time.Duration(cfg.ReactiveBaseDelayMS) * time.Millisecond,
+		reactiveMaxDelay:          time.Duration(cfg.ReactiveMaxDelaySeconds) * time.Second,
+		reactiveJitter:            time.Duration(cfg.ReactiveJitterMS) * time.Millisecond,
+		adaptiveEnabled:           cfg.AdaptiveEnabled != nil && *cfg.AdaptiveEnabled,
+		adaptiveIncreaseOnSuccess: cfg.AdaptiveIncreaseOnSuccess != nil && *cfg.AdaptiveIncreaseOnSuccess,
+		adaptiveDecreaseFactor:    cfg.AdaptiveDecreaseFactor,
+		adaptiveMinRateLimit:      cfg.AdaptiveMinRateLimit,
+		adaptiveMode:              internalconfig.ProviderRateLimitModeAuto,
 	}
 	for _, override := range cfg.Overrides {
-		if !providerRateLimitOverrideMatches(override, auth, providerKey) {
+		if !providerRateLimitOverrideMatches(override, auth, providerKey, modelKey) {
 			continue
 		}
 		if override.Enabled != nil {
@@ -254,12 +312,18 @@ func (l *providerRateLimiter) resolvePolicyLocked(auth *Auth, providerKey string
 		if override.ReactiveJitterMS > 0 {
 			policy.reactiveJitter = time.Duration(override.ReactiveJitterMS) * time.Millisecond
 		}
+		if override.Mode != "" {
+			policy.adaptiveMode = override.Mode
+		}
 	}
 	if policy.scope == "" {
 		policy.scope = internalconfig.ProviderRateLimitScopeCredential
 	}
 	if policy.rateLimit <= 0 {
 		policy.rateLimit = internalconfig.DefaultProviderRateLimit
+	}
+	if policy.adaptiveMaxRateLimit <= 0 {
+		policy.adaptiveMaxRateLimit = internalconfig.DefaultProviderRateLimit
 	}
 	if policy.window <= 0 {
 		policy.window = time.Duration(internalconfig.DefaultProviderRateWindowSec) * time.Second
@@ -276,6 +340,15 @@ func (l *providerRateLimiter) resolvePolicyLocked(auth *Auth, providerKey string
 	if policy.reactiveJitter < 0 {
 		policy.reactiveJitter = 0
 	}
+	if policy.adaptiveDecreaseFactor <= 0 || policy.adaptiveDecreaseFactor >= 1 {
+		policy.adaptiveDecreaseFactor = internalconfig.DefaultProviderAdaptiveDecreaseFactor
+	}
+	if policy.adaptiveMinRateLimit <= 0 {
+		policy.adaptiveMinRateLimit = internalconfig.DefaultProviderAdaptiveMinRateLimit
+	}
+	if policy.adaptiveMode == "" {
+		policy.adaptiveMode = internalconfig.ProviderRateLimitModeAuto
+	}
 	return policy
 }
 
@@ -283,6 +356,7 @@ func providerRateLimitOverrideMatches(
 	override internalconfig.ProviderRateLimitOverride,
 	auth *Auth,
 	providerKey string,
+	modelKey string,
 ) bool {
 	if override.Provider != "" && !strings.EqualFold(override.Provider, providerKey) {
 		return false
@@ -291,6 +365,9 @@ func providerRateLimitOverrideMatches(
 		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.ID), override.AuthID) {
 			return false
 		}
+	}
+	if model := providerRateLimitModelKey(override.Model); model != "" && !strings.EqualFold(model, modelKey) {
+		return false
 	}
 	return override.Provider != "" || override.AuthID != ""
 }
@@ -311,13 +388,18 @@ func providerRateLimitProviderKey(auth *Auth, provider string) string {
 	return strings.ToLower(strings.TrimSpace(auth.Provider))
 }
 
-func (l *providerRateLimiter) scopeKeyLocked(policy providerRateLimiterPolicy, auth *Auth, providerKey string) (string, bool) {
+func (l *providerRateLimiter) scopeKeyLocked(policy providerRateLimiterPolicy, auth *Auth, providerKey, modelKey string) (string, bool) {
 	switch policy.scope {
 	case internalconfig.ProviderRateLimitScopeProvider:
 		if providerKey == "" {
 			return "", false
 		}
 		return "provider:" + providerKey, true
+	case internalconfig.ProviderRateLimitScopeProviderModel:
+		if providerKey == "" || modelKey == "" {
+			return "", false
+		}
+		return "provider:" + providerKey + "|model:" + modelKey, true
 	default:
 		credentialKey := ""
 		if auth != nil {
@@ -334,6 +416,129 @@ func (l *providerRateLimiter) scopeKeyLocked(policy providerRateLimiterPolicy, a
 		}
 		return "credential:" + credentialKey, true
 	}
+}
+
+func providerRateLimitModelKey(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	base := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if base != "" {
+		model = base
+	}
+	return strings.ToLower(strings.TrimSpace(model))
+}
+
+func providerRateLimitAuthID(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+func adaptiveDecreasedRateLimit(current int, factor float64, minLimit int) int {
+	if current <= 0 {
+		return 0
+	}
+	if minLimit <= 0 {
+		minLimit = 1
+	}
+	if factor <= 0 || factor >= 1 {
+		factor = internalconfig.DefaultProviderAdaptiveDecreaseFactor
+	}
+	next := int(math.Floor(float64(current) * factor))
+	if next >= current {
+		next = current - 1
+	}
+	if next < minLimit {
+		next = minLimit
+	}
+	return next
+}
+
+func adaptiveIncreasedRateLimit(current int, maxLimit int) int {
+	if current <= 0 {
+		return 0
+	}
+	if maxLimit <= 0 {
+		maxLimit = internalconfig.DefaultProviderRateLimit
+	}
+	if current >= maxLimit {
+		return current
+	}
+	return current + 1
+}
+
+type providerRateLimitAdaptiveUpdate struct {
+	provider string
+	authID   string
+	model    string
+	scope    string
+	rate     int
+}
+
+func (l *providerRateLimiter) persistAdaptiveUpdate(update *providerRateLimitAdaptiveUpdate) {
+	if l == nil || update == nil || update.rate <= 0 {
+		return
+	}
+	l.mu.Lock()
+	mutator := l.configMutator
+	l.mu.Unlock()
+	if mutator == nil {
+		return
+	}
+	mutator(func(cfg *internalconfig.ProviderRateLimitConfig) bool {
+		if cfg == nil {
+			return false
+		}
+		if cfg.Overrides == nil {
+			cfg.Overrides = make([]internalconfig.ProviderRateLimitOverride, 0, 1)
+		}
+		for i := range cfg.Overrides {
+			override := &cfg.Overrides[i]
+			if !providerRateLimitOverrideKeyMatches(*override, update.provider, update.authID, update.model) {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(override.Mode), internalconfig.ProviderRateLimitModeManual) {
+				return false
+			}
+			changed := false
+			if override.RateLimit != update.rate {
+				override.RateLimit = update.rate
+				changed = true
+			}
+			if strings.TrimSpace(override.Mode) != internalconfig.ProviderRateLimitModeAuto {
+				override.Mode = internalconfig.ProviderRateLimitModeAuto
+				changed = true
+			}
+			return changed
+		}
+		cfg.Overrides = append(cfg.Overrides, internalconfig.ProviderRateLimitOverride{
+			Provider:  update.provider,
+			AuthID:    update.authID,
+			Model:     update.model,
+			Mode:      internalconfig.ProviderRateLimitModeAuto,
+			Scope:     update.scope,
+			RateLimit: update.rate,
+		})
+		return true
+	})
+}
+
+func providerRateLimitOverrideKeyMatches(
+	override internalconfig.ProviderRateLimitOverride,
+	provider string,
+	authID string,
+	model string,
+) bool {
+	if strings.TrimSpace(override.Provider) != strings.TrimSpace(provider) {
+		return false
+	}
+	if strings.TrimSpace(override.AuthID) != strings.TrimSpace(authID) {
+		return false
+	}
+	return providerRateLimitModelKey(override.Model) == providerRateLimitModelKey(model)
 }
 
 func (l *providerRateLimiter) bucketLocked(key string) *providerRateLimiterBucket {

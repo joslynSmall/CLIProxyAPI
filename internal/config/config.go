@@ -21,14 +21,19 @@ import (
 )
 
 const (
-	DefaultPanelGitHubRepository  = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-	DefaultPprofAddr              = "127.0.0.1:8316"
-	DefaultProviderRateLimit      = 40
-	DefaultProviderRateWindowSec  = 60
-	DefaultProviderMaxConcurrent  = 5
-	DefaultProviderReactiveBase   = 1000
-	DefaultProviderReactiveMaxSec = 60
-	DefaultProviderReactiveJitter = 300
+	DefaultPanelGitHubRepository              = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr                          = "127.0.0.1:8316"
+	DefaultProviderRateLimit                  = 40
+	DefaultProviderRateWindowSec              = 60
+	DefaultProviderMaxConcurrent              = 5
+	DefaultProviderReactiveBase               = 1000
+	DefaultProviderReactiveMaxSec             = 60
+	DefaultProviderReactiveJitter             = 300
+	DefaultProviderAdaptiveEnabled            = true
+	DefaultProviderAdaptiveIncreaseOnSuccess  = false
+	DefaultProviderAdaptiveDecreaseFactor     = 0.8
+	DefaultProviderAdaptiveMinRateLimit       = 1
+	DefaultProviderAdaptivePersistDebounceSec = 2
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -227,21 +232,29 @@ type RoutingConfig struct {
 }
 
 const (
-	ProviderRateLimitScopeCredential = "credential"
-	ProviderRateLimitScopeProvider   = "provider"
+	ProviderRateLimitScopeCredential    = "credential"
+	ProviderRateLimitScopeProvider      = "provider"
+	ProviderRateLimitScopeProviderModel = "provider-model"
+	ProviderRateLimitModeAuto           = "auto"
+	ProviderRateLimitModeManual         = "manual"
 )
 
 // ProviderRateLimitConfig defines global and override limits for upstream provider requests.
 type ProviderRateLimitConfig struct {
-	Enabled                 *bool                       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	Scope                   string                      `yaml:"scope,omitempty" json:"scope,omitempty"`
-	RateLimit               int                         `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
-	RateWindowSeconds       int                         `yaml:"rate-window-seconds,omitempty" json:"rate-window-seconds,omitempty"`
-	MaxStreamConcurrency    int                         `yaml:"max-stream-concurrency,omitempty" json:"max-stream-concurrency,omitempty"`
-	ReactiveBaseDelayMS     int                         `yaml:"reactive-base-delay-ms,omitempty" json:"reactive-base-delay-ms,omitempty"`
-	ReactiveMaxDelaySeconds int                         `yaml:"reactive-max-delay-seconds,omitempty" json:"reactive-max-delay-seconds,omitempty"`
-	ReactiveJitterMS        int                         `yaml:"reactive-jitter-ms,omitempty" json:"reactive-jitter-ms,omitempty"`
-	Overrides               []ProviderRateLimitOverride `yaml:"overrides,omitempty" json:"overrides,omitempty"`
+	Enabled                        *bool                       `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Scope                          string                      `yaml:"scope,omitempty" json:"scope,omitempty"`
+	RateLimit                      int                         `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
+	RateWindowSeconds              int                         `yaml:"rate-window-seconds,omitempty" json:"rate-window-seconds,omitempty"`
+	MaxStreamConcurrency           int                         `yaml:"max-stream-concurrency,omitempty" json:"max-stream-concurrency,omitempty"`
+	ReactiveBaseDelayMS            int                         `yaml:"reactive-base-delay-ms,omitempty" json:"reactive-base-delay-ms,omitempty"`
+	ReactiveMaxDelaySeconds        int                         `yaml:"reactive-max-delay-seconds,omitempty" json:"reactive-max-delay-seconds,omitempty"`
+	ReactiveJitterMS               int                         `yaml:"reactive-jitter-ms,omitempty" json:"reactive-jitter-ms,omitempty"`
+	AdaptiveEnabled                *bool                       `yaml:"adaptive-enabled,omitempty" json:"adaptive-enabled,omitempty"`
+	AdaptiveIncreaseOnSuccess      *bool                       `yaml:"adaptive-increase-on-success,omitempty" json:"adaptive-increase-on-success,omitempty"`
+	AdaptiveDecreaseFactor         float64                     `yaml:"adaptive-decrease-factor,omitempty" json:"adaptive-decrease-factor,omitempty"`
+	AdaptiveMinRateLimit           int                         `yaml:"adaptive-min-rate-limit,omitempty" json:"adaptive-min-rate-limit,omitempty"`
+	AdaptivePersistDebounceSeconds int                         `yaml:"adaptive-persist-debounce-seconds,omitempty" json:"adaptive-persist-debounce-seconds,omitempty"`
+	Overrides                      []ProviderRateLimitOverride `yaml:"overrides,omitempty" json:"overrides,omitempty"`
 }
 
 // EnabledOrDefault returns whether provider rate limit is enabled.
@@ -256,6 +269,8 @@ func (c ProviderRateLimitConfig) EnabledOrDefault() bool {
 type ProviderRateLimitOverride struct {
 	Provider                string `yaml:"provider,omitempty" json:"provider,omitempty"`
 	AuthID                  string `yaml:"auth-id,omitempty" json:"auth-id,omitempty"`
+	Model                   string `yaml:"model,omitempty" json:"model,omitempty"`
+	Mode                    string `yaml:"mode,omitempty" json:"mode,omitempty"`
 	Enabled                 *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Scope                   string `yaml:"scope,omitempty" json:"scope,omitempty"`
 	RateLimit               int    `yaml:"rate-limit,omitempty" json:"rate-limit,omitempty"`
@@ -273,14 +288,19 @@ func boolPtr(v bool) *bool {
 // DefaultProviderRateLimitConfig returns the default provider rate limit settings.
 func DefaultProviderRateLimitConfig() ProviderRateLimitConfig {
 	return ProviderRateLimitConfig{
-		Enabled:                 boolPtr(true),
-		Scope:                   ProviderRateLimitScopeCredential,
-		RateLimit:               DefaultProviderRateLimit,
-		RateWindowSeconds:       DefaultProviderRateWindowSec,
-		MaxStreamConcurrency:    DefaultProviderMaxConcurrent,
-		ReactiveBaseDelayMS:     DefaultProviderReactiveBase,
-		ReactiveMaxDelaySeconds: DefaultProviderReactiveMaxSec,
-		ReactiveJitterMS:        DefaultProviderReactiveJitter,
+		Enabled:                        boolPtr(true),
+		Scope:                          ProviderRateLimitScopeCredential,
+		RateLimit:                      DefaultProviderRateLimit,
+		RateWindowSeconds:              DefaultProviderRateWindowSec,
+		MaxStreamConcurrency:           DefaultProviderMaxConcurrent,
+		ReactiveBaseDelayMS:            DefaultProviderReactiveBase,
+		ReactiveMaxDelaySeconds:        DefaultProviderReactiveMaxSec,
+		ReactiveJitterMS:               DefaultProviderReactiveJitter,
+		AdaptiveEnabled:                boolPtr(DefaultProviderAdaptiveEnabled),
+		AdaptiveIncreaseOnSuccess:      boolPtr(DefaultProviderAdaptiveIncreaseOnSuccess),
+		AdaptiveDecreaseFactor:         DefaultProviderAdaptiveDecreaseFactor,
+		AdaptiveMinRateLimit:           DefaultProviderAdaptiveMinRateLimit,
+		AdaptivePersistDebounceSeconds: DefaultProviderAdaptivePersistDebounceSec,
 	}
 }
 
@@ -302,7 +322,7 @@ func normalizeProviderRateLimitConfig(input ProviderRateLimitConfig, strict bool
 	scope := strings.ToLower(strings.TrimSpace(input.Scope))
 	switch scope {
 	case "":
-	case ProviderRateLimitScopeCredential, ProviderRateLimitScopeProvider:
+	case ProviderRateLimitScopeCredential, ProviderRateLimitScopeProvider, ProviderRateLimitScopeProviderModel:
 		out.Scope = scope
 	default:
 		if strict {
@@ -328,6 +348,23 @@ func normalizeProviderRateLimitConfig(input ProviderRateLimitConfig, strict bool
 	if input.ReactiveJitterMS > 0 {
 		out.ReactiveJitterMS = input.ReactiveJitterMS
 	}
+	if input.AdaptiveEnabled != nil {
+		out.AdaptiveEnabled = boolPtr(*input.AdaptiveEnabled)
+	}
+	if input.AdaptiveIncreaseOnSuccess != nil {
+		out.AdaptiveIncreaseOnSuccess = boolPtr(*input.AdaptiveIncreaseOnSuccess)
+	}
+	if input.AdaptiveDecreaseFactor > 0 && input.AdaptiveDecreaseFactor < 1 {
+		out.AdaptiveDecreaseFactor = input.AdaptiveDecreaseFactor
+	} else if input.AdaptiveDecreaseFactor != 0 && strict {
+		return ProviderRateLimitConfig{}, fmt.Errorf("adaptive-decrease-factor must be between 0 and 1")
+	}
+	if input.AdaptiveMinRateLimit > 0 {
+		out.AdaptiveMinRateLimit = input.AdaptiveMinRateLimit
+	}
+	if input.AdaptivePersistDebounceSeconds > 0 {
+		out.AdaptivePersistDebounceSeconds = input.AdaptivePersistDebounceSeconds
+	}
 
 	if len(input.Overrides) > 0 {
 		out.Overrides = make([]ProviderRateLimitOverride, 0, len(input.Overrides))
@@ -335,19 +372,32 @@ func normalizeProviderRateLimitConfig(input ProviderRateLimitConfig, strict bool
 			item := raw
 			item.Provider = strings.ToLower(strings.TrimSpace(item.Provider))
 			item.AuthID = strings.TrimSpace(item.AuthID)
+			item.Model = strings.TrimSpace(item.Model)
 			if item.Provider == "" && item.AuthID == "" {
 				continue
 			}
 			if item.Scope != "" {
 				scope := strings.ToLower(strings.TrimSpace(item.Scope))
 				switch scope {
-				case ProviderRateLimitScopeCredential, ProviderRateLimitScopeProvider:
+				case ProviderRateLimitScopeCredential, ProviderRateLimitScopeProvider, ProviderRateLimitScopeProviderModel:
 					item.Scope = scope
 				default:
 					if strict {
 						return ProviderRateLimitConfig{}, fmt.Errorf("override scope %q is invalid", item.Scope)
 					}
 					item.Scope = ""
+				}
+			}
+			if item.Mode != "" {
+				mode := strings.ToLower(strings.TrimSpace(item.Mode))
+				switch mode {
+				case ProviderRateLimitModeAuto, ProviderRateLimitModeManual:
+					item.Mode = mode
+				default:
+					if strict {
+						return ProviderRateLimitConfig{}, fmt.Errorf("override mode %q is invalid", item.Mode)
+					}
+					item.Mode = ""
 				}
 			}
 			if item.RateLimit < 0 {
@@ -1606,6 +1656,10 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == strconv.Itoa(DefaultProviderReactiveMaxSec)
 		case "provider-rate-limit.reactive-jitter-ms":
 			return node.Value == strconv.Itoa(DefaultProviderReactiveJitter)
+		case "provider-rate-limit.adaptive-min-rate-limit":
+			return node.Value == strconv.Itoa(DefaultProviderAdaptiveMinRateLimit)
+		case "provider-rate-limit.adaptive-persist-debounce-seconds":
+			return node.Value == strconv.Itoa(DefaultProviderAdaptivePersistDebounceSec)
 		}
 	}
 
@@ -1613,6 +1667,17 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "provider-rate-limit.enabled":
 			return node.Value == "true"
+		case "provider-rate-limit.adaptive-enabled":
+			return node.Value == "true"
+		case "provider-rate-limit.adaptive-increase-on-success":
+			return node.Value == "false"
+		}
+	}
+
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!float" {
+		switch fullPath {
+		case "provider-rate-limit.adaptive-decrease-factor":
+			return node.Value == "0.8"
 		}
 	}
 

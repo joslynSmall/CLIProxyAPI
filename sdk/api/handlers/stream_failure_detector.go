@@ -41,6 +41,13 @@ func (e *streamPayloadFailure) StatusCode() int {
 	return e.statusCode
 }
 
+func (e *streamPayloadFailure) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.code)
+}
+
 func (d *streamFailureDetector) Observe(chunk []byte) error {
 	if len(chunk) == 0 {
 		return nil

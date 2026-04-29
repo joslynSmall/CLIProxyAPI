@@ -18,7 +18,7 @@ func TestProviderRateLimit_Get(t *testing.T) {
 	cfg := &config.Config{
 		ProviderRateLimit: config.ProviderRateLimitConfig{
 			Enabled:                 boolPtr(false),
-			Scope:                   config.ProviderRateLimitScopeProvider,
+			Scope:                   config.ProviderRateLimitScopeProviderModel,
 			RateLimit:               12,
 			RateWindowSeconds:       30,
 			MaxStreamConcurrency:    2,
@@ -44,8 +44,8 @@ func TestProviderRateLimit_Get(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload.Value.Scope != config.ProviderRateLimitScopeProvider {
-		t.Fatalf("scope = %q, want %q", payload.Value.Scope, config.ProviderRateLimitScopeProvider)
+	if payload.Value.Scope != config.ProviderRateLimitScopeProviderModel {
+		t.Fatalf("scope = %q, want %q", payload.Value.Scope, config.ProviderRateLimitScopeProviderModel)
 	}
 	if payload.Value.RateLimit != 12 {
 		t.Fatalf("rate-limit = %d, want 12", payload.Value.RateLimit)
@@ -63,7 +63,7 @@ func TestProviderRateLimit_Put(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPut,
 		"/v0/management/provider-rate-limit",
-		bytes.NewBufferString(`{"value":{"enabled":false,"scope":"provider","rate-limit":55,"rate-window-seconds":45,"max-stream-concurrency":3,"reactive-base-delay-ms":1500,"reactive-max-delay-seconds":90,"reactive-jitter-ms":100}}`),
+		bytes.NewBufferString(`{"value":{"enabled":false,"scope":"provider-model","rate-limit":55,"rate-window-seconds":45,"max-stream-concurrency":3,"reactive-base-delay-ms":1500,"reactive-max-delay-seconds":90,"reactive-jitter-ms":100,"adaptive-enabled":true,"adaptive-increase-on-success":false,"adaptive-decrease-factor":0.7,"adaptive-min-rate-limit":2}}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -75,11 +75,14 @@ func TestProviderRateLimit_Put(t *testing.T) {
 	if cfg.ProviderRateLimit.EnabledOrDefault() {
 		t.Fatal("enabled should be false")
 	}
-	if cfg.ProviderRateLimit.Scope != config.ProviderRateLimitScopeProvider {
-		t.Fatalf("scope = %q, want %q", cfg.ProviderRateLimit.Scope, config.ProviderRateLimitScopeProvider)
+	if cfg.ProviderRateLimit.Scope != config.ProviderRateLimitScopeProviderModel {
+		t.Fatalf("scope = %q, want %q", cfg.ProviderRateLimit.Scope, config.ProviderRateLimitScopeProviderModel)
 	}
 	if cfg.ProviderRateLimit.RateLimit != 55 {
 		t.Fatalf("rate-limit = %d, want 55", cfg.ProviderRateLimit.RateLimit)
+	}
+	if cfg.ProviderRateLimit.AdaptiveDecreaseFactor != 0.7 {
+		t.Fatalf("adaptive-decrease-factor = %v, want 0.7", cfg.ProviderRateLimit.AdaptiveDecreaseFactor)
 	}
 
 	persisted, err := os.ReadFile(configPath)
@@ -110,6 +113,30 @@ func TestProviderRateLimit_PutInvalidScope(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestProviderRateLimit_GetOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, _ := newReasoningDefaultsTestHandler(t, &config.Config{})
+	router := gin.New()
+	router.GET("/v0/management/provider-rate-limit/options", h.GetProviderRateLimitOptions)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/provider-rate-limit/options", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, ok := payload["providers"]; !ok {
+		t.Fatalf("missing providers in payload: %s", rec.Body.String())
+	}
+	if _, ok := payload["models"]; !ok {
+		t.Fatalf("missing models in payload: %s", rec.Body.String())
 	}
 }
 

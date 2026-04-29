@@ -600,6 +600,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
 		mgmt.PATCH("/request-retry", s.mgmt.PutRequestRetry)
 		mgmt.GET("/provider-rate-limit", s.mgmt.GetProviderRateLimit)
+		mgmt.GET("/provider-rate-limit/options", s.mgmt.GetProviderRateLimitOptions)
 		mgmt.PUT("/provider-rate-limit", s.mgmt.PutProviderRateLimit)
 		mgmt.PATCH("/provider-rate-limit", s.mgmt.PutProviderRateLimit)
 		mgmt.GET("/reasoning-ingress-options", s.mgmt.GetReasoningIngressOptions)

@@ -1086,6 +1086,9 @@ func TestExecuteStreamWithAuthManager_FailsOnSSEDataErrorPayload(t *testing.T) {
 	if record.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status_code = %d, want %d", record.StatusCode, http.StatusBadGateway)
 	}
+	if record.ErrorCode != "invalid_parameter_error" {
+		t.Fatalf("error_code = %q, want %q", record.ErrorCode, "invalid_parameter_error")
+	}
 	if !strings.Contains(record.ErrorMessage, `"invalid_parameter_error"`) {
 		t.Fatalf("unexpected error_message: %q", record.ErrorMessage)
 	}
@@ -1150,6 +1153,9 @@ func TestExecuteStreamWithAuthManager_FailsOnOpenAIResponsesErrorEvent(t *testin
 	}
 	if record.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status_code = %d, want %d", record.StatusCode, http.StatusBadGateway)
+	}
+	if record.ErrorCode != "upstream_error" {
+		t.Fatalf("error_code = %q, want %q", record.ErrorCode, "upstream_error")
 	}
 	if !strings.Contains(record.ErrorMessage, `"stream failed"`) {
 		t.Fatalf("unexpected error_message: %q", record.ErrorMessage)

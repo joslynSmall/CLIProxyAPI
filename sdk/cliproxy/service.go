@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/mongostate"
@@ -128,6 +129,10 @@ type Service struct {
 
 	// geminiCLIModelDiscoverer resolves live Gemini CLI models for one auth/project.
 	geminiCLIModelDiscoverer func(context.Context, *coreauth.Auth) (*executor.GeminiCLIDiscoveryResult, error)
+
+	providerRateLimitPersistMu    sync.Mutex
+	providerRateLimitPersistTimer *time.Timer
+	providerRateLimitPersistDirty bool
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -561,6 +566,77 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) applyProviderRateLimitConfigMutation(mutator func(*internalconfig.ProviderRateLimitConfig) bool) {
+	if s == nil || mutator == nil {
+		return
+	}
+	var (
+		cfgRef          *config.Config
+		changed         bool
+		persistDebounce int
+	)
+	s.cfgMu.Lock()
+	if s.cfg != nil {
+		changed = mutator(&s.cfg.ProviderRateLimit)
+		cfgRef = s.cfg
+		persistDebounce = s.cfg.ProviderRateLimit.AdaptivePersistDebounceSeconds
+	}
+	s.cfgMu.Unlock()
+	if !changed || cfgRef == nil {
+		return
+	}
+	if persistDebounce <= 0 {
+		persistDebounce = internalconfig.DefaultProviderAdaptivePersistDebounceSec
+	}
+	if s.coreManager != nil {
+		s.coreManager.SetConfig(cfgRef)
+	}
+	s.scheduleProviderRateLimitPersist(time.Duration(persistDebounce) * time.Second)
+}
+
+func (s *Service) scheduleProviderRateLimitPersist(delay time.Duration) {
+	if s == nil {
+		return
+	}
+	if delay <= 0 {
+		delay = time.Second
+	}
+	s.providerRateLimitPersistMu.Lock()
+	s.providerRateLimitPersistDirty = true
+	if s.providerRateLimitPersistTimer != nil {
+		s.providerRateLimitPersistTimer.Reset(delay)
+		s.providerRateLimitPersistMu.Unlock()
+		return
+	}
+	s.providerRateLimitPersistTimer = time.AfterFunc(delay, s.flushProviderRateLimitPersist)
+	s.providerRateLimitPersistMu.Unlock()
+}
+
+func (s *Service) flushProviderRateLimitPersist() {
+	if s == nil {
+		return
+	}
+	s.providerRateLimitPersistMu.Lock()
+	s.providerRateLimitPersistTimer = nil
+	dirty := s.providerRateLimitPersistDirty
+	s.providerRateLimitPersistDirty = false
+	s.providerRateLimitPersistMu.Unlock()
+	if !dirty {
+		return
+	}
+	s.cfgMu.RLock()
+	cfgRef := s.cfg
+	configPath := strings.TrimSpace(s.configPath)
+	s.cfgMu.RUnlock()
+	if cfgRef == nil || configPath == "" {
+		return
+	}
+	if err := config.SaveConfigPreserveComments(configPath, cfgRef); err != nil {
+		log.Warnf("provider-rate-limit adaptive persist failed: %v", err)
+		s.scheduleProviderRateLimitPersist(time.Duration(internalconfig.DefaultProviderAdaptivePersistDebounceSec) * time.Second)
+	}
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -596,6 +672,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.coreManager != nil {
 		s.coreManager.SetConfig(s.cfg)
 		s.coreManager.SetOAuthModelAlias(s.cfg.OAuthModelAlias)
+		s.coreManager.SetProviderRateLimitConfigMutator(s.applyProviderRateLimitConfigMutation)
 	}
 	if errFailureStore := s.initCircuitBreakerFailureStore(ctx); errFailureStore != nil {
 		return fmt.Errorf("cliproxy: failed to initialize circuit breaker failure store: %w", errFailureStore)
@@ -843,6 +920,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
+		s.providerRateLimitPersistMu.Lock()
+		if s.providerRateLimitPersistTimer != nil {
+			s.providerRateLimitPersistTimer.Stop()
+			s.providerRateLimitPersistTimer = nil
+		}
+		s.providerRateLimitPersistDirty = false
+		s.providerRateLimitPersistMu.Unlock()
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}

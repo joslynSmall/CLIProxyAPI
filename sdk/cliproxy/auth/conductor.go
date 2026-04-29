@@ -306,18 +306,25 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
-func (m *Manager) waitProviderRateLimit(ctx context.Context, auth *Auth, provider string, stream bool) (func(), error) {
-	if m == nil || m.providerRateLimiter == nil {
-		return nil, nil
-	}
-	return m.providerRateLimiter.Wait(ctx, auth, provider, stream)
-}
-
-func (m *Manager) notifyProviderRateLimitResult(auth *Auth, provider string, result Result) {
+func (m *Manager) SetProviderRateLimitConfigMutator(mutator func(func(*internalconfig.ProviderRateLimitConfig) bool)) {
 	if m == nil || m.providerRateLimiter == nil {
 		return
 	}
-	m.providerRateLimiter.OnResult(auth, provider, result)
+	m.providerRateLimiter.SetConfigMutator(mutator)
+}
+
+func (m *Manager) waitProviderRateLimit(ctx context.Context, auth *Auth, provider, model string, stream bool) (func(), error) {
+	if m == nil || m.providerRateLimiter == nil {
+		return nil, nil
+	}
+	return m.providerRateLimiter.Wait(ctx, auth, provider, model, stream)
+}
+
+func (m *Manager) notifyProviderRateLimitResult(auth *Auth, provider, model string, result Result) {
+	if m == nil || m.providerRateLimiter == nil {
+		return
+	}
+	m.providerRateLimiter.OnResult(auth, provider, model, result)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -816,7 +823,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := executionResultModel(routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
-		releaseStreamSlot, errWait := m.waitProviderRateLimit(ctx, auth, provider, true)
+		releaseStreamSlot, errWait := m.waitProviderRateLimit(ctx, auth, provider, execModel, true)
 		if errWait != nil {
 			return nil, errWait
 		}
@@ -1347,7 +1354,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, false); errWait != nil {
+			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, upstreamModel, false); errWait != nil {
 				return cliproxyexecutor.Response{}, errWait
 			}
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
@@ -1432,7 +1439,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, false); errWait != nil {
+			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, upstreamModel, false); errWait != nil {
 				return cliproxyexecutor.Response{}, errWait
 			}
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
@@ -2202,7 +2209,7 @@ func (m *Manager) markResult(ctx context.Context, result Result) error {
 	if rateLimitAuth == nil {
 		rateLimitAuth = &Auth{ID: result.AuthID, Provider: result.Provider}
 	}
-	m.notifyProviderRateLimitResult(rateLimitAuth, result.Provider, result)
+	m.notifyProviderRateLimitResult(rateLimitAuth, result.Provider, result.Model, result)
 
 	m.hook.OnResult(ctx, result)
 	return nil
@@ -3627,7 +3634,7 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	if _, errWait := m.waitProviderRateLimit(ctx, auth, providerKey, false); errWait != nil {
+	if _, errWait := m.waitProviderRateLimit(ctx, auth, providerKey, "", false); errWait != nil {
 		return nil, errWait
 	}
 	resp, errExec := exec.HttpRequest(ctx, auth, req)
@@ -3645,7 +3652,7 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 			},
 			RetryAfter: retryAfterFromHTTPResponse(resp),
 		}
-		m.notifyProviderRateLimitResult(auth, providerKey, result)
+		m.notifyProviderRateLimitResult(auth, providerKey, "", result)
 	}
 	return resp, nil
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -372,7 +373,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			e.recordOpenAICompatFailure(auth, circuitModel)
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(b), errCode: extractUpstreamErrorCode(b, false)}
+		err = statusErr{
+			code:       httpResp.StatusCode,
+			msg:        string(b),
+			errCode:    extractUpstreamErrorCode(b, false),
+			retryAfter: parseRetryAfterHeader(httpResp.Header.Get("Retry-After")),
+		}
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -557,7 +563,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			log.Errorf("openai compat executor stream: close response body error: %v", errClose)
 		}
 		e.recordOpenAICompatFailure(auth, circuitModel)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b), errCode: extractUpstreamErrorCode(b, false)}
+		err = statusErr{
+			code:       httpResp.StatusCode,
+			msg:        string(b),
+			errCode:    extractUpstreamErrorCode(b, false),
+			retryAfter: parseRetryAfterHeader(httpResp.Header.Get("Retry-After")),
+		}
 		return nil, err
 	}
 
@@ -1203,6 +1214,24 @@ func synthesizeOpenAIResponsesCompletion(modelName string) [][]byte {
 	completedChunk = append(completedChunk, completed...)
 	completedChunk = append(completedChunk, '\n', '\n')
 	return [][]byte{createdChunk, completedChunk}
+}
+
+func parseRetryAfterHeader(raw string) *time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		delay := time.Duration(secs) * time.Second
+		return &delay
+	}
+	if resetAt, err := http.ParseTime(raw); err == nil {
+		delay := time.Until(resetAt)
+		if delay > 0 {
+			return &delay
+		}
+	}
+	return nil
 }
 
 type statusErr struct {

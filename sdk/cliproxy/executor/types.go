@@ -11,6 +11,18 @@ import (
 const RequestedModelMetadataKey = "requested_model"
 
 const (
+	// IngressRequestedModelMetadataKey stores the original model requested by the client.
+	IngressRequestedModelMetadataKey = "ingress_requested_model"
+	// IngressAPIKeyMetadataKey stores the ingress API key associated with the request.
+	IngressAPIKeyMetadataKey = "ingress_api_key"
+	// SessionAffinityMetadataKey stores the session-affinity identifier for request-level suppression.
+	SessionAffinityMetadataKey = "session_affinity"
+	// AvailabilityCacheHitMetadataKey marks that the request was short-circuited by the suppression cache.
+	AvailabilityCacheHitMetadataKey = "availability_cache_hit"
+	// SelectedUpstreamModelMetadataKey stores the upstream model chosen for the current execution attempt.
+	SelectedUpstreamModelMetadataKey = "selected_upstream_model"
+	// ExecutionMetadataContextKey stores the shared execution metadata map on the Gin context.
+	ExecutionMetadataContextKey = "cliproxy_execution_metadata"
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.

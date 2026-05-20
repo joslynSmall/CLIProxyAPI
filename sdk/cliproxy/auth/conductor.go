@@ -3,11 +3,15 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,6 +165,11 @@ type Manager struct {
 	// providerRateLimiter throttles upstream requests with proactive/reactive/concurrency controls.
 	providerRateLimiter *providerRateLimiter
 
+	// availabilitySuppression short-circuits repeated requests when the same request scope
+	// has already exhausted all currently available credentials.
+	availabilitySuppressionMu sync.RWMutex
+	availabilitySuppression   map[string]time.Time
+
 	// circuitFailureStore is the strong-consistency source for auth+model failure counts.
 	circuitFailureStore CircuitBreakerFailureStore
 
@@ -181,15 +190,16 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:               store,
-		executors:           make(map[string]ProviderExecutor),
-		selector:            selector,
-		hook:                hook,
-		auths:               make(map[string]*Auth),
-		providerOffsets:     make(map[string]int),
-		modelPoolOffsets:    make(map[string]int),
-		refreshSemaphore:    make(chan struct{}, refreshMaxConcurrency),
-		providerRateLimiter: newProviderRateLimiter(&internalconfig.Config{}),
+		store:                   store,
+		executors:               make(map[string]ProviderExecutor),
+		selector:                selector,
+		hook:                    hook,
+		auths:                   make(map[string]*Auth),
+		providerOffsets:         make(map[string]int),
+		modelPoolOffsets:        make(map[string]int),
+		availabilitySuppression: make(map[string]time.Time),
+		refreshSemaphore:        make(chan struct{}, refreshMaxConcurrency),
+		providerRateLimiter:     newProviderRateLimiter(&internalconfig.Config{}),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -304,6 +314,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		m.providerRateLimiter.UpdateConfig(cfg)
 	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.clearAvailabilitySuppressionAll()
 }
 
 func (m *Manager) SetProviderRateLimitConfigMutator(mutator func(func(*internalconfig.ProviderRateLimitConfig) bool)) {
@@ -325,6 +336,204 @@ func (m *Manager) notifyProviderRateLimitResult(auth *Auth, provider, model stri
 		return
 	}
 	m.providerRateLimiter.OnResult(auth, provider, model, result)
+}
+
+func (m *Manager) clearAvailabilitySuppressionAll() {
+	if m == nil {
+		return
+	}
+	m.availabilitySuppressionMu.Lock()
+	if len(m.availabilitySuppression) > 0 {
+		m.availabilitySuppression = make(map[string]time.Time)
+	}
+	m.availabilitySuppressionMu.Unlock()
+}
+
+func (m *Manager) clearAvailabilitySuppressionKey(key string) {
+	key = strings.TrimSpace(key)
+	if m == nil || key == "" {
+		return
+	}
+	m.availabilitySuppressionMu.Lock()
+	delete(m.availabilitySuppression, key)
+	m.availabilitySuppressionMu.Unlock()
+}
+
+func (m *Manager) setAvailabilitySuppression(key string, expiresAt time.Time) {
+	key = strings.TrimSpace(key)
+	if m == nil || key == "" || expiresAt.IsZero() {
+		return
+	}
+	now := time.Now()
+	if !expiresAt.After(now) {
+		return
+	}
+	m.availabilitySuppressionMu.Lock()
+	if m.availabilitySuppression == nil {
+		m.availabilitySuppression = make(map[string]time.Time)
+	}
+	m.availabilitySuppression[key] = expiresAt.UTC()
+	m.availabilitySuppressionMu.Unlock()
+}
+
+func (m *Manager) availabilitySuppressionUntil(key string) (time.Time, bool) {
+	key = strings.TrimSpace(key)
+	if m == nil || key == "" {
+		return time.Time{}, false
+	}
+	now := time.Now()
+	m.availabilitySuppressionMu.RLock()
+	expiresAt, ok := m.availabilitySuppression[key]
+	m.availabilitySuppressionMu.RUnlock()
+	if !ok {
+		return time.Time{}, false
+	}
+	if !expiresAt.After(now) {
+		m.availabilitySuppressionMu.Lock()
+		if current, exists := m.availabilitySuppression[key]; exists && !current.After(now) {
+			delete(m.availabilitySuppression, key)
+		}
+		m.availabilitySuppressionMu.Unlock()
+		return time.Time{}, false
+	}
+	return expiresAt, true
+}
+
+func availabilitySuppressionKey(meta map[string]any, providers []string) string {
+	requestedModel := metadataString(meta, cliproxyexecutor.IngressRequestedModelMetadataKey)
+	if requestedModel == "" {
+		requestedModel = metadataString(meta, cliproxyexecutor.RequestedModelMetadataKey)
+	}
+	requestedModel = strings.ToLower(strings.TrimSpace(requestedModel))
+	apiKey := metadataString(meta, cliproxyexecutor.IngressAPIKeyMetadataKey)
+	sessionAffinity := metadataString(meta, cliproxyexecutor.SessionAffinityMetadataKey)
+	normalizedProviders := normalizeProviderKeys(providers)
+	if len(normalizedProviders) > 1 {
+		sortedProviders := append([]string(nil), normalizedProviders...)
+		sort.Strings(sortedProviders)
+		normalizedProviders = sortedProviders
+	}
+	if requestedModel == "" && apiKey == "" && sessionAffinity == "" && len(normalizedProviders) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		requestedModel,
+		strings.ToLower(strings.TrimSpace(apiKey)),
+		strings.Join(normalizedProviders, ","),
+		strings.ToLower(strings.TrimSpace(sessionAffinity)),
+	}, "|")))
+	return hex.EncodeToString(sum[:])
+}
+
+func (m *Manager) availabilitySuppressionExpiry(err error, providers []string, model string) (time.Time, bool) {
+	if err == nil {
+		return time.Time{}, false
+	}
+	if !isAvailabilityFailure(err) {
+		return time.Time{}, false
+	}
+	wait, found := m.closestCooldownWait(providers, model, 0)
+	if !found || wait <= 0 {
+		wait = 5 * time.Second
+	}
+	if wait > 30*time.Second {
+		wait = 30 * time.Second
+	}
+	return time.Now().Add(wait), true
+}
+
+func (m *Manager) availabilitySuppressionForRequest(meta map[string]any, providers []string) (string, time.Time, bool) {
+	if m == nil {
+		return "", time.Time{}, false
+	}
+	key := availabilitySuppressionKey(meta, providers)
+	if key == "" {
+		return "", time.Time{}, false
+	}
+	if expiresAt, ok := m.availabilitySuppressionUntil(key); ok {
+		return key, expiresAt, true
+	}
+	return key, time.Time{}, false
+}
+
+func (m *Manager) clearAvailabilitySuppressionForRequest(meta map[string]any, providers []string) {
+	if m == nil {
+		return
+	}
+	key := availabilitySuppressionKey(meta, providers)
+	if key == "" {
+		return
+	}
+	m.clearAvailabilitySuppressionKey(key)
+}
+
+func (m *Manager) setAvailabilitySuppressionForRequest(meta map[string]any, providers []string, err error) bool {
+	if m == nil {
+		return false
+	}
+	key := availabilitySuppressionKey(meta, providers)
+	if key == "" {
+		return false
+	}
+	expiresAt, ok := m.availabilitySuppressionExpiry(err, providers, metadataString(meta, cliproxyexecutor.IngressRequestedModelMetadataKey))
+	if !ok || expiresAt.IsZero() {
+		return false
+	}
+	m.setAvailabilitySuppression(key, expiresAt)
+	return true
+}
+
+func (m *Manager) markAvailabilityCacheHit(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	delete(meta, cliproxyexecutor.SelectedAuthMetadataKey)
+	delete(meta, cliproxyexecutor.SelectedUpstreamModelMetadataKey)
+	meta[cliproxyexecutor.AvailabilityCacheHitMetadataKey] = true
+}
+
+func resetExecutionSelectionMetadata(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	delete(meta, cliproxyexecutor.SelectedAuthMetadataKey)
+	delete(meta, cliproxyexecutor.SelectedUpstreamModelMetadataKey)
+	delete(meta, cliproxyexecutor.AvailabilityCacheHitMetadataKey)
+}
+
+func metadataString(meta map[string]any, key string) string {
+	if len(meta) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+}
+
+func isAvailabilityFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch strings.TrimSpace(authErr.Code) {
+		case "auth_not_found", "auth_unavailable":
+			return true
+		}
+	}
+	var cooldownErr *modelCooldownError
+	return errors.As(err, &cooldownErr)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -823,6 +1032,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := executionResultModel(routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
+		if opts.Metadata != nil {
+			opts.Metadata[cliproxyexecutor.SelectedUpstreamModelMetadataKey] = execModel
+		}
 		releaseStreamSlot, errWait := m.waitProviderRateLimit(ctx, auth, provider, execModel, true)
 		if errWait != nil {
 			return nil, errWait
@@ -1128,6 +1340,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.clearAvailabilitySuppressionAll()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
@@ -1158,6 +1371,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.auths[auth.ID] = authClone
 	m.mu.Unlock()
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.clearAvailabilitySuppressionAll()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(authClone)
 	}
@@ -1193,6 +1407,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	m.rebuildAPIKeyModelAliasLocked(cfg)
 	m.mu.Unlock()
 	m.syncScheduler()
+	m.clearAvailabilitySuppressionAll()
 	return nil
 }
 
@@ -1202,6 +1417,12 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
+	}
+	opts = ensureRequestedModelMetadata(opts, req.Model)
+	resetExecutionSelectionMetadata(opts.Metadata)
+	if _, _, ok := m.availabilitySuppressionForRequest(opts.Metadata, normalized); ok {
+		m.markAvailabilityCacheHit(opts.Metadata)
+		return cliproxyexecutor.Response{}, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
 	if cancel != nil {
@@ -1214,6 +1435,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
+			m.clearAvailabilitySuppressionForRequest(opts.Metadata, normalized)
 			return resp, nil
 		}
 		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errExec)
@@ -1227,6 +1449,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		}
 	}
 	if lastErr != nil {
+		if isAvailabilityFailure(lastErr) {
+			m.setAvailabilitySuppressionForRequest(opts.Metadata, normalized, lastErr)
+		}
 		return cliproxyexecutor.Response{}, mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -1239,6 +1464,12 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = ensureRequestedModelMetadata(opts, req.Model)
+	resetExecutionSelectionMetadata(opts.Metadata)
+	if _, _, ok := m.availabilitySuppressionForRequest(opts.Metadata, normalized); ok {
+		m.markAvailabilityCacheHit(opts.Metadata)
+		return cliproxyexecutor.Response{}, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
 	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
 	if cancel != nil {
 		defer cancel()
@@ -1250,6 +1481,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	for attempt := 0; ; attempt++ {
 		resp, errExec := m.executeCountMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
+			m.clearAvailabilitySuppressionForRequest(opts.Metadata, normalized)
 			return resp, nil
 		}
 		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errExec)
@@ -1263,6 +1495,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		}
 	}
 	if lastErr != nil {
+		if isAvailabilityFailure(lastErr) {
+			m.setAvailabilitySuppressionForRequest(opts.Metadata, normalized, lastErr)
+		}
 		return cliproxyexecutor.Response{}, mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -1275,6 +1510,12 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	opts = ensureRequestedModelMetadata(opts, req.Model)
+	resetExecutionSelectionMetadata(opts.Metadata)
+	if _, _, ok := m.availabilitySuppressionForRequest(opts.Metadata, normalized); ok {
+		m.markAvailabilityCacheHit(opts.Metadata)
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
 	execCtx, cancel, budgetEnabled := m.withRequestBudget(ctx)
 
 	_, maxRetryCredentials, maxWait := m.retrySettings()
@@ -1283,6 +1524,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		result, errStream := m.executeStreamMixedOnce(execCtx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
+			m.clearAvailabilitySuppressionForRequest(opts.Metadata, normalized)
 			return wrapStreamResultWithCancel(execCtx, result, cancel, budgetEnabled), nil
 		}
 		mappedErr := mapRequestBudgetError(execCtx, budgetEnabled, errStream)
@@ -1300,6 +1542,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	finalErr := mapRequestBudgetError(execCtx, budgetEnabled, lastErr)
+	if isAvailabilityFailure(finalErr) {
+		m.setAvailabilitySuppressionForRequest(opts.Metadata, normalized, finalErr)
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -1354,6 +1599,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if opts.Metadata != nil {
+				opts.Metadata[cliproxyexecutor.SelectedUpstreamModelMetadataKey] = upstreamModel
+			}
 			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, upstreamModel, false); errWait != nil {
 				return cliproxyexecutor.Response{}, errWait
 			}
@@ -1439,6 +1687,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			resultModel := executionResultModel(routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if opts.Metadata != nil {
+				opts.Metadata[cliproxyexecutor.SelectedUpstreamModelMetadataKey] = upstreamModel
+			}
 			if _, errWait := m.waitProviderRateLimit(execCtx, auth, provider, upstreamModel, false); errWait != nil {
 				return cliproxyexecutor.Response{}, errWait
 			}
@@ -1547,10 +1798,18 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 		return opts
 	}
 	if hasRequestedModelMetadata(opts.Metadata) {
+		if len(opts.Metadata) > 0 {
+			if metadataString(opts.Metadata, cliproxyexecutor.IngressRequestedModelMetadataKey) == "" {
+				opts.Metadata[cliproxyexecutor.IngressRequestedModelMetadataKey] = requestedModel
+			}
+		}
 		return opts
 	}
 	if len(opts.Metadata) == 0 {
-		opts.Metadata = map[string]any{cliproxyexecutor.RequestedModelMetadataKey: requestedModel}
+		opts.Metadata = map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey:        requestedModel,
+			cliproxyexecutor.IngressRequestedModelMetadataKey: requestedModel,
+		}
 		return opts
 	}
 	meta := make(map[string]any, len(opts.Metadata)+1)
@@ -1558,6 +1817,9 @@ func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel 
 		meta[k] = v
 	}
 	meta[cliproxyexecutor.RequestedModelMetadataKey] = requestedModel
+	if metadataString(meta, cliproxyexecutor.IngressRequestedModelMetadataKey) == "" {
+		meta[cliproxyexecutor.IngressRequestedModelMetadataKey] = requestedModel
+	}
 	opts.Metadata = meta
 	return opts
 }

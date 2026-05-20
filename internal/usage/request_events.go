@@ -18,22 +18,25 @@ const (
 )
 
 type RequestEvent struct {
-	EventID            uint64     `json:"event_id"`
-	Timestamp          time.Time  `json:"timestamp"`
-	Model              string     `json:"model"`
-	Source             string     `json:"source"`
-	AuthID             string     `json:"auth_id,omitempty"`
-	AuthIndex          string     `json:"auth_index"`
-	Failed             bool       `json:"failed"`
-	FailureStage       string     `json:"failure_stage,omitempty"`
-	ErrorCode          string     `json:"error_code,omitempty"`
-	ErrorMessage       string     `json:"error_message,omitempty"`
-	StatusCode         int        `json:"status_code,omitempty"`
-	RequestID          string     `json:"request_id,omitempty"`
-	RequestLogRef      string     `json:"request_log_ref,omitempty"`
-	AttemptCount       int        `json:"attempt_count,omitempty"`
-	UpstreamRequestIDs []string   `json:"upstream_request_ids,omitempty"`
-	Tokens             TokenStats `json:"tokens"`
+	EventID               uint64     `json:"event_id"`
+	Timestamp             time.Time  `json:"timestamp"`
+	Model                 string     `json:"model"`
+	RequestedModel        string     `json:"requested_model,omitempty"`
+	SelectedUpstreamModel string     `json:"selected_upstream_model,omitempty"`
+	AvailabilityCacheHit  bool       `json:"availability_cache_hit,omitempty"`
+	Source                string     `json:"source"`
+	AuthID                string     `json:"auth_id,omitempty"`
+	AuthIndex             string     `json:"auth_index"`
+	Failed                bool       `json:"failed"`
+	FailureStage          string     `json:"failure_stage,omitempty"`
+	ErrorCode             string     `json:"error_code,omitempty"`
+	ErrorMessage          string     `json:"error_message,omitempty"`
+	StatusCode            int        `json:"status_code,omitempty"`
+	RequestID             string     `json:"request_id,omitempty"`
+	RequestLogRef         string     `json:"request_log_ref,omitempty"`
+	AttemptCount          int        `json:"attempt_count,omitempty"`
+	UpstreamRequestIDs    []string   `json:"upstream_request_ids,omitempty"`
+	Tokens                TokenStats `json:"tokens"`
 }
 
 type RequestEventSubscription struct {
@@ -258,21 +261,24 @@ func BuildRequestEventPage(stats *RequestStatistics, hub *RequestEventHub, query
 					continue
 				}
 				items = append(items, RequestEvent{
-					Timestamp:          detail.Timestamp.UTC(),
-					Model:              strings.TrimSpace(modelName),
-					Source:             detail.Source,
-					AuthID:             detail.AuthID,
-					AuthIndex:          detail.AuthIndex,
-					Failed:             detail.Failed,
-					FailureStage:       detail.FailureStage,
-					ErrorCode:          detail.ErrorCode,
-					ErrorMessage:       detail.ErrorMessage,
-					StatusCode:         detail.StatusCode,
-					RequestID:          detail.RequestID,
-					RequestLogRef:      detail.RequestLogRef,
-					AttemptCount:       detail.AttemptCount,
-					UpstreamRequestIDs: append([]string(nil), detail.UpstreamRequestIDs...),
-					Tokens:             detail.Tokens,
+					Timestamp:             detail.Timestamp.UTC(),
+					Model:                 strings.TrimSpace(modelName),
+					RequestedModel:        detail.RequestedModel,
+					SelectedUpstreamModel: detail.SelectedUpstreamModel,
+					AvailabilityCacheHit:  detail.AvailabilityCacheHit,
+					Source:                detail.Source,
+					AuthID:                detail.AuthID,
+					AuthIndex:             detail.AuthIndex,
+					Failed:                detail.Failed,
+					FailureStage:          detail.FailureStage,
+					ErrorCode:             detail.ErrorCode,
+					ErrorMessage:          detail.ErrorMessage,
+					StatusCode:            detail.StatusCode,
+					RequestID:             detail.RequestID,
+					RequestLogRef:         detail.RequestLogRef,
+					AttemptCount:          detail.AttemptCount,
+					UpstreamRequestIDs:    append([]string(nil), detail.UpstreamRequestIDs...),
+					Tokens:                detail.Tokens,
 				})
 			}
 		}
@@ -301,22 +307,25 @@ func requestEventFromRecord(id uint64, record coreusage.Record) RequestEvent {
 	}
 	detail := normaliseDetail(record.Detail)
 	return RequestEvent{
-		EventID:            id,
-		Timestamp:          timestamp.UTC(),
-		Model:              strings.TrimSpace(record.Model),
-		Source:             record.Source,
-		AuthID:             strings.TrimSpace(record.AuthID),
-		AuthIndex:          record.AuthIndex,
-		Failed:             record.Failed,
-		FailureStage:       strings.TrimSpace(record.FailureStage),
-		ErrorCode:          strings.TrimSpace(record.ErrorCode),
-		ErrorMessage:       strings.TrimSpace(record.ErrorMessage),
-		StatusCode:         record.StatusCode,
-		RequestID:          strings.TrimSpace(record.RequestID),
-		RequestLogRef:      strings.TrimSpace(record.RequestLogRef),
-		AttemptCount:       maxInt(record.AttemptCount, 0),
-		UpstreamRequestIDs: append([]string(nil), record.UpstreamRequestIDs...),
-		Tokens:             detail,
+		EventID:               id,
+		Timestamp:             timestamp.UTC(),
+		Model:                 strings.TrimSpace(record.Model),
+		RequestedModel:        strings.TrimSpace(record.RequestedModel),
+		SelectedUpstreamModel: strings.TrimSpace(record.SelectedUpstreamModel),
+		AvailabilityCacheHit:  record.AvailabilityCacheHit,
+		Source:                record.Source,
+		AuthID:                strings.TrimSpace(record.AuthID),
+		AuthIndex:             record.AuthIndex,
+		Failed:                record.Failed,
+		FailureStage:          strings.TrimSpace(record.FailureStage),
+		ErrorCode:             strings.TrimSpace(record.ErrorCode),
+		ErrorMessage:          strings.TrimSpace(record.ErrorMessage),
+		StatusCode:            record.StatusCode,
+		RequestID:             strings.TrimSpace(record.RequestID),
+		RequestLogRef:         strings.TrimSpace(record.RequestLogRef),
+		AttemptCount:          maxInt(record.AttemptCount, 0),
+		UpstreamRequestIDs:    append([]string(nil), record.UpstreamRequestIDs...),
+		Tokens:                detail,
 	}
 }
 

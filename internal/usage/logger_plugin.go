@@ -89,21 +89,24 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp          time.Time  `json:"timestamp"`
-	LatencyMs          int64      `json:"latency_ms"`
-	Source             string     `json:"source"`
-	AuthID             string     `json:"auth_id,omitempty"`
-	AuthIndex          string     `json:"auth_index"`
-	RequestID          string     `json:"request_id,omitempty"`
-	RequestLogRef      string     `json:"request_log_ref,omitempty"`
-	AttemptCount       int        `json:"attempt_count,omitempty"`
-	UpstreamRequestIDs []string   `json:"upstream_request_ids,omitempty"`
-	Tokens             TokenStats `json:"tokens"`
-	Failed             bool       `json:"failed"`
-	FailureStage       string     `json:"failure_stage,omitempty"`
-	ErrorCode          string     `json:"error_code,omitempty"`
-	ErrorMessage       string     `json:"error_message,omitempty"`
-	StatusCode         int        `json:"status_code,omitempty"`
+	Timestamp             time.Time  `json:"timestamp"`
+	LatencyMs             int64      `json:"latency_ms"`
+	RequestedModel        string     `json:"requested_model,omitempty"`
+	SelectedUpstreamModel string     `json:"selected_upstream_model,omitempty"`
+	AvailabilityCacheHit  bool       `json:"availability_cache_hit,omitempty"`
+	Source                string     `json:"source"`
+	AuthID                string     `json:"auth_id,omitempty"`
+	AuthIndex             string     `json:"auth_index"`
+	RequestID             string     `json:"request_id,omitempty"`
+	RequestLogRef         string     `json:"request_log_ref,omitempty"`
+	AttemptCount          int        `json:"attempt_count,omitempty"`
+	UpstreamRequestIDs    []string   `json:"upstream_request_ids,omitempty"`
+	Tokens                TokenStats `json:"tokens"`
+	Failed                bool       `json:"failed"`
+	FailureStage          string     `json:"failure_stage,omitempty"`
+	ErrorCode             string     `json:"error_code,omitempty"`
+	ErrorMessage          string     `json:"error_message,omitempty"`
+	StatusCode            int        `json:"status_code,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -207,21 +210,24 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp:          timestamp,
-		LatencyMs:          normaliseLatency(record.Latency),
-		Source:             record.Source,
-		AuthID:             strings.TrimSpace(record.AuthID),
-		AuthIndex:          record.AuthIndex,
-		RequestID:          strings.TrimSpace(record.RequestID),
-		RequestLogRef:      strings.TrimSpace(record.RequestLogRef),
-		AttemptCount:       maxInt(record.AttemptCount, 0),
-		UpstreamRequestIDs: append([]string(nil), record.UpstreamRequestIDs...),
-		Tokens:             detail,
-		Failed:             failed,
-		FailureStage:       strings.TrimSpace(record.FailureStage),
-		ErrorCode:          strings.TrimSpace(record.ErrorCode),
-		ErrorMessage:       strings.TrimSpace(record.ErrorMessage),
-		StatusCode:         record.StatusCode,
+		Timestamp:             timestamp,
+		LatencyMs:             normaliseLatency(record.Latency),
+		RequestedModel:        strings.TrimSpace(record.RequestedModel),
+		SelectedUpstreamModel: strings.TrimSpace(record.SelectedUpstreamModel),
+		AvailabilityCacheHit:  record.AvailabilityCacheHit,
+		Source:                record.Source,
+		AuthID:                strings.TrimSpace(record.AuthID),
+		AuthIndex:             record.AuthIndex,
+		RequestID:             strings.TrimSpace(record.RequestID),
+		RequestLogRef:         strings.TrimSpace(record.RequestLogRef),
+		AttemptCount:          maxInt(record.AttemptCount, 0),
+		UpstreamRequestIDs:    append([]string(nil), record.UpstreamRequestIDs...),
+		Tokens:                detail,
+		Failed:                failed,
+		FailureStage:          strings.TrimSpace(record.FailureStage),
+		ErrorCode:             strings.TrimSpace(record.ErrorCode),
+		ErrorMessage:          strings.TrimSpace(record.ErrorMessage),
+		StatusCode:            record.StatusCode,
 	})
 
 	s.requestsByDay[dayKey]++

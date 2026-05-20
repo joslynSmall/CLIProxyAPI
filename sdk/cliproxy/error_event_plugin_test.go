@@ -40,21 +40,24 @@ func TestErrorEventPluginHandleUsageWritesFailedRecord(t *testing.T) {
 
 	plugin := NewErrorEventPlugin()
 	record := coreusage.Record{
-		Provider:           "gemini",
-		Model:              "gpt-5(high)",
-		Source:             "api_key",
-		AuthID:             "auth-1",
-		AuthIndex:          "1",
-		RequestID:          "req-1",
-		RequestLogRef:      "req-1",
-		AttemptCount:       3,
-		UpstreamRequestIDs: []string{"up-1", "up-2"},
-		RequestedAt:        time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC),
-		Failed:             true,
-		FailureStage:       "request_execution",
-		ErrorCode:          "upstream_error",
-		ErrorMessage:       "invalid_request_error: token=abc123 authorization: bearer very-secret",
-		StatusCode:         400,
+		Provider:              "gemini",
+		Model:                 "gpt-5(high)",
+		RequestedModel:        "gpt-5.4-mini",
+		SelectedUpstreamModel: "kimi-k2.5",
+		AvailabilityCacheHit:  true,
+		Source:                "api_key",
+		AuthID:                "auth-1",
+		AuthIndex:             "1",
+		RequestID:             "req-1",
+		RequestLogRef:         "req-1",
+		AttemptCount:          3,
+		UpstreamRequestIDs:    []string{"up-1", "up-2"},
+		RequestedAt:           time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC),
+		Failed:                true,
+		FailureStage:          "request_execution",
+		ErrorCode:             "upstream_error",
+		ErrorMessage:          "invalid_request_error: token=abc123 authorization: bearer very-secret",
+		StatusCode:            400,
 	}
 	plugin.HandleUsage(context.Background(), record)
 
@@ -62,6 +65,15 @@ func TestErrorEventPluginHandleUsageWritesFailedRecord(t *testing.T) {
 		t.Fatalf("insert count = %d, want 1", len(store.inserted))
 	}
 	inserted := store.inserted[0]
+	if inserted.RequestedModel != "gpt-5.4-mini" {
+		t.Fatalf("requested_model = %q, want %q", inserted.RequestedModel, "gpt-5.4-mini")
+	}
+	if inserted.SelectedUpstreamModel != "kimi-k2.5" {
+		t.Fatalf("selected_upstream_model = %q, want %q", inserted.SelectedUpstreamModel, "kimi-k2.5")
+	}
+	if !inserted.AvailabilityCacheHit {
+		t.Fatal("availability_cache_hit = false, want true")
+	}
 	if inserted.NormalizedModel != "gpt-5" {
 		t.Fatalf("normalized model = %q, want %q", inserted.NormalizedModel, "gpt-5")
 	}

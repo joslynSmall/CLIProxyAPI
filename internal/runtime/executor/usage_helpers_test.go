@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -113,6 +114,30 @@ func TestUsageReporterBuildRecordIncludesAttemptSummary(t *testing.T) {
 	}
 	if len(record.UpstreamRequestIDs) != 3 || record.UpstreamRequestIDs[0] != "up-1" || record.UpstreamRequestIDs[1] != "up-2" || record.UpstreamRequestIDs[2] != "up-3" {
 		t.Fatalf("upstream_request_ids = %#v, want [up-1 up-2 up-3]", record.UpstreamRequestIDs)
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesExecutionMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	ginCtx.Set(coreexecutor.ExecutionMetadataContextKey, map[string]any{
+		coreexecutor.IngressRequestedModelMetadataKey: "gpt-5.4-mini",
+		coreexecutor.SelectedUpstreamModelMetadataKey: "kimi-k2.5",
+		coreexecutor.AvailabilityCacheHitMetadataKey:  true,
+	})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	reporter := &usageReporter{provider: "openai", model: "gpt-5.4", requestedAt: time.Now()}
+	record := reporter.buildRecord(ctx, usage.Detail{}, true)
+
+	if record.RequestedModel != "gpt-5.4-mini" {
+		t.Fatalf("requested_model = %q, want %q", record.RequestedModel, "gpt-5.4-mini")
+	}
+	if record.SelectedUpstreamModel != "kimi-k2.5" {
+		t.Fatalf("selected_upstream_model = %q, want %q", record.SelectedUpstreamModel, "kimi-k2.5")
+	}
+	if !record.AvailabilityCacheHit {
+		t.Fatal("availability_cache_hit = false, want true")
 	}
 }
 

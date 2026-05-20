@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -102,25 +103,32 @@ func (r *usageReporter) buildRecord(ctx context.Context, detail usage.Detail, fa
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	attemptSummary := usageAttemptSummary(ctx)
+	requestedModel := executionMetadataString(ctx, coreexecutor.IngressRequestedModelMetadataKey)
+	if requestedModel == "" {
+		requestedModel = executionMetadataString(ctx, coreexecutor.RequestedModelMetadataKey)
+	}
 	return usage.Record{
-		Provider:           r.provider,
-		Model:              r.model,
-		Source:             r.source,
-		APIKey:             r.apiKey,
-		AuthID:             r.authID,
-		AuthIndex:          r.authIndex,
-		RequestID:          requestIDFromContext(ctx),
-		RequestLogRef:      requestLogRefFromContext(ctx),
-		AttemptCount:       attemptSummary.AttemptCount,
-		UpstreamRequestIDs: append([]string(nil), attemptSummary.UpstreamRequestIDs...),
-		RequestedAt:        r.requestedAt,
-		Latency:            r.latency(),
-		Failed:             failed,
-		FailureStage:       r.failureStage,
-		ErrorCode:          r.errorCode,
-		ErrorMessage:       r.errorMessage,
-		StatusCode:         r.statusCode,
-		Detail:             detail,
+		Provider:              r.provider,
+		Model:                 r.model,
+		RequestedModel:        requestedModel,
+		SelectedUpstreamModel: executionMetadataString(ctx, coreexecutor.SelectedUpstreamModelMetadataKey),
+		AvailabilityCacheHit:  executionMetadataBool(ctx, coreexecutor.AvailabilityCacheHitMetadataKey),
+		Source:                r.source,
+		APIKey:                r.apiKey,
+		AuthID:                r.authID,
+		AuthIndex:             r.authIndex,
+		RequestID:             requestIDFromContext(ctx),
+		RequestLogRef:         requestLogRefFromContext(ctx),
+		AttemptCount:          attemptSummary.AttemptCount,
+		UpstreamRequestIDs:    append([]string(nil), attemptSummary.UpstreamRequestIDs...),
+		RequestedAt:           r.requestedAt,
+		Latency:               r.latency(),
+		Failed:                failed,
+		FailureStage:          r.failureStage,
+		ErrorCode:             r.errorCode,
+		ErrorMessage:          r.errorMessage,
+		StatusCode:            r.statusCode,
+		Detail:                detail,
 	}
 }
 
@@ -250,6 +258,72 @@ func requestIDFromContext(ctx context.Context) string {
 
 func requestLogRefFromContext(ctx context.Context) string {
 	return requestIDFromContext(ctx)
+}
+
+func executionMetadataFromContext(ctx context.Context) map[string]any {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return nil
+	}
+	raw, exists := ginCtx.Get(coreexecutor.ExecutionMetadataContextKey)
+	if !exists || raw == nil {
+		return nil
+	}
+	meta, ok := raw.(map[string]any)
+	if !ok || len(meta) == 0 {
+		return nil
+	}
+	return meta
+}
+
+func executionMetadataString(ctx context.Context, key string) string {
+	return metadataString(executionMetadataFromContext(ctx), key)
+}
+
+func executionMetadataBool(ctx context.Context, key string) bool {
+	meta := executionMetadataFromContext(ctx)
+	if len(meta) == 0 || strings.TrimSpace(key) == "" {
+		return false
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "t", "true", "yes", "y":
+			return true
+		}
+	default:
+		return false
+	}
+	return false
+}
+
+func metadataString(meta map[string]any, key string) string {
+	if len(meta) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {

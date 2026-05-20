@@ -21,28 +21,31 @@ const (
 
 // ErrorEventRecord captures one failed upstream request in structured form.
 type ErrorEventRecord struct {
-	ID                 primitive.ObjectID `bson:"_id,omitempty"`
-	DedupeKey          string             `bson:"dedupe_key,omitempty"`
-	CreatedAt          time.Time          `bson:"created_at"`
-	OccurredAt         time.Time          `bson:"occurred_at"`
-	Provider           string             `bson:"provider"`
-	Model              string             `bson:"model"`
-	NormalizedModel    string             `bson:"normalized_model"`
-	Source             string             `bson:"source,omitempty"`
-	AuthID             string             `bson:"auth_id,omitempty"`
-	AuthIndex          string             `bson:"auth_index,omitempty"`
-	RequestID          string             `bson:"request_id,omitempty"`
-	RequestLogRef      string             `bson:"request_log_ref,omitempty"`
-	AttemptCount       int                `bson:"attempt_count,omitempty"`
-	UpstreamRequestIDs []string           `bson:"upstream_request_ids,omitempty"`
-	Failed             bool               `bson:"failed"`
-	FailureStage       string             `bson:"failure_stage,omitempty"`
-	ErrorCode          string             `bson:"error_code,omitempty"`
-	ErrorMessageMasked string             `bson:"error_message_masked,omitempty"`
-	ErrorMessageHash   string             `bson:"error_message_hash,omitempty"`
-	StatusCode         int                `bson:"status_code,omitempty"`
-	CircuitCountable   bool               `bson:"circuit_countable"`
-	CircuitSkipReason  string             `bson:"circuit_skip_reason,omitempty"`
+	ID                    primitive.ObjectID `bson:"_id,omitempty"`
+	DedupeKey             string             `bson:"dedupe_key,omitempty"`
+	CreatedAt             time.Time          `bson:"created_at"`
+	OccurredAt            time.Time          `bson:"occurred_at"`
+	Provider              string             `bson:"provider"`
+	Model                 string             `bson:"model"`
+	NormalizedModel       string             `bson:"normalized_model"`
+	RequestedModel        string             `bson:"requested_model,omitempty"`
+	SelectedUpstreamModel string             `bson:"selected_upstream_model,omitempty"`
+	AvailabilityCacheHit  bool               `bson:"availability_cache_hit,omitempty"`
+	Source                string             `bson:"source,omitempty"`
+	AuthID                string             `bson:"auth_id,omitempty"`
+	AuthIndex             string             `bson:"auth_index,omitempty"`
+	RequestID             string             `bson:"request_id,omitempty"`
+	RequestLogRef         string             `bson:"request_log_ref,omitempty"`
+	AttemptCount          int                `bson:"attempt_count,omitempty"`
+	UpstreamRequestIDs    []string           `bson:"upstream_request_ids,omitempty"`
+	Failed                bool               `bson:"failed"`
+	FailureStage          string             `bson:"failure_stage,omitempty"`
+	ErrorCode             string             `bson:"error_code,omitempty"`
+	ErrorMessageMasked    string             `bson:"error_message_masked,omitempty"`
+	ErrorMessageHash      string             `bson:"error_message_hash,omitempty"`
+	StatusCode            int                `bson:"status_code,omitempty"`
+	CircuitCountable      bool               `bson:"circuit_countable"`
+	CircuitSkipReason     string             `bson:"circuit_skip_reason,omitempty"`
 }
 
 // ErrorEventItem is the API-facing shape returned by management query endpoints.

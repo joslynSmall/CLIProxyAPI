@@ -196,9 +196,22 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
+	apiKey := ""
+	sessionAffinity := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			if v, exists := ginCtx.Get("apiKey"); exists {
+				switch value := v.(type) {
+				case string:
+					apiKey = strings.TrimSpace(value)
+				case fmt.Stringer:
+					apiKey = strings.TrimSpace(value.String())
+				default:
+					apiKey = strings.TrimSpace(fmt.Sprintf("%v", value))
+				}
+			}
+			sessionAffinity = strings.TrimSpace(ginCtx.GetHeader("X-Session-Affinity"))
 		}
 	}
 	if key == "" {
@@ -206,6 +219,12 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 
 	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	if apiKey != "" {
+		meta[coreexecutor.IngressAPIKeyMetadataKey] = apiKey
+	}
+	if sessionAffinity != "" {
+		meta[coreexecutor.SessionAffinityMetadataKey] = sessionAffinity
+	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}
@@ -214,6 +233,11 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			ginCtx.Set(coreexecutor.ExecutionMetadataContextKey, meta)
+		}
 	}
 	return meta
 }
@@ -895,6 +919,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.IngressRequestedModelMetadataKey] = normalizedModel
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -963,6 +988,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.IngressRequestedModelMetadataKey] = normalizedModel
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -1016,6 +1042,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.IngressRequestedModelMetadataKey] = normalizedModel
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -1404,20 +1431,27 @@ func publishHandlerFailureUsage(ctx context.Context, authManager *coreauth.Manag
 	}
 	provider, authID, authIndex := resolveHandlerFailureRecordContext(authManager, candidateProviders, reqMeta)
 	errorCode, errorMessage, resolvedStatus := resolveHandlerUsageError(err, status)
+	requestedModel := metadataString(reqMeta, coreexecutor.IngressRequestedModelMetadataKey)
+	if requestedModel == "" {
+		requestedModel = metadataString(reqMeta, coreexecutor.RequestedModelMetadataKey)
+	}
 	coreusage.PublishRecord(ctx, coreusage.Record{
-		Provider:      strings.TrimSpace(provider),
-		Model:         strings.TrimSpace(model),
-		APIKey:        handlerAPIKeyFromContext(ctx),
-		AuthID:        authID,
-		AuthIndex:     authIndex,
-		RequestID:     handlerRequestIDFromContext(ctx),
-		RequestLogRef: handlerRequestIDFromContext(ctx),
-		RequestedAt:   time.Now(),
-		Failed:        true,
-		FailureStage:  resolveHandlerFailureStage(err),
-		ErrorCode:     errorCode,
-		ErrorMessage:  errorMessage,
-		StatusCode:    resolvedStatus,
+		Provider:              strings.TrimSpace(provider),
+		Model:                 strings.TrimSpace(model),
+		RequestedModel:        requestedModel,
+		SelectedUpstreamModel: metadataString(reqMeta, coreexecutor.SelectedUpstreamModelMetadataKey),
+		AvailabilityCacheHit:  metadataBool(reqMeta, coreexecutor.AvailabilityCacheHitMetadataKey),
+		APIKey:                handlerAPIKeyFromContext(ctx),
+		AuthID:                authID,
+		AuthIndex:             authIndex,
+		RequestID:             handlerRequestIDFromContext(ctx),
+		RequestLogRef:         handlerRequestIDFromContext(ctx),
+		RequestedAt:           time.Now(),
+		Failed:                true,
+		FailureStage:          resolveHandlerFailureStage(err),
+		ErrorCode:             errorCode,
+		ErrorMessage:          errorMessage,
+		StatusCode:            resolvedStatus,
 	})
 }
 
@@ -1503,6 +1537,26 @@ func metadataString(meta map[string]any, key string) string {
 	default:
 		return strings.TrimSpace(fmt.Sprintf("%v", typed))
 	}
+}
+
+func metadataBool(meta map[string]any, key string) bool {
+	if len(meta) == 0 || strings.TrimSpace(key) == "" {
+		return false
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return false
+	}
+	switch typed := raw.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "t", "true", "yes", "y":
+			return true
+		}
+	}
+	return false
 }
 
 func resolveHandlerUsageError(err error, fallbackStatus int) (code, message string, status int) {

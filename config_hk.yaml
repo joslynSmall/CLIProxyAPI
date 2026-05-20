@@ -17,10 +17,11 @@ routing:
 quota-exceeded:
   switch-project: true
   switch-preview-model: true
-request-retry: 10
-request-budget-seconds: 180
+request-retry: 4
+request-budget-seconds: 300
 max-retry-credentials: 5
-max-retry-interval: 180
+max-retry-interval: 30
+nonstream-keepalive-interval: 5
 provider-rate-limit:
   enabled: true
   scope: credential

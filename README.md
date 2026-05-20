@@ -62,10 +62,18 @@ The project uses **two config files** for different environments:
 |------|---------|------------|
 | `config.yaml` | Local development | `./auths` (local relative path) |
 | `config-277.yaml` | Production (227 server) | `/opt/cliproxy/auths` |
+| `config_hk.yaml` | Production (ssh hk) | `auths` (`/home/ubuntu/cli-proxy-hk/auths`) |
+
+Timeout and cancellation diagnostics:
+
+- `request-budget-seconds` is the total per-request budget, including retry and cooldown time. When it is exhausted, the proxy returns `upstream_timeout: upstream request budget exceeded` and request logs include `Error Category: request_budget_exceeded` and `Cancel Source: request_budget`.
+- `nonstream-keepalive-interval` emits blank lines while non-streaming requests wait for upstream responses. The non-streaming `/v1/chat/completions` path uses this keep-alive to reduce idle disconnects from clients, gateways, and reverse proxies during long reasoning requests.
+- Downstream disconnects that cancel upstream requests are logged as `Error Category: context_canceled` and `Cancel Source: downstream_cancelled`, so they can be distinguished from server-side request budget timeouts.
 
 - **Local development (recommended)**: `./bin/air` (managed by `.air.toml`, equivalent to running with `-config config.yaml`)
 - **Fallback local run**: `go run ./cmd/server`
 - **Production deployment**: `./cli-proxy-new -config config-277.yaml`
+- **ssh hk production deployment**: `/home/ubuntu/cli-proxy-hk/cli-proxy-api.bin -config /home/ubuntu/cli-proxy-hk/config_hk.yaml`
 
 For detailed configuration options, see the [User Manual](https://help.router-for.me/cn/).
 

@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -39,6 +40,8 @@ type upstreamRequestLog struct {
 
 type upstreamAttempt struct {
 	index                int
+	startedAt            time.Time
+	firstByteAt          time.Time
 	request              string
 	response             *strings.Builder
 	statusCode           int
@@ -85,10 +88,12 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	builder.WriteString(fmt.Sprintf("Body Bytes: %d\n", len(info.Body)))
 	builder.WriteString("\n\n")
 
+	now := time.Now()
 	attempt := &upstreamAttempt{
-		index:    index,
-		request:  builder.String(),
-		response: &strings.Builder{},
+		index:     index,
+		startedAt: now,
+		request:   builder.String(),
+		response:  &strings.Builder{},
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
@@ -139,6 +144,15 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 		attempt.response.WriteString("\n")
 	}
 	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
+	category, cancelSource := classifyUpstreamError(err)
+	attempt.response.WriteString(fmt.Sprintf("Error Category: %s\n", category))
+	attempt.response.WriteString(fmt.Sprintf("Cancel Source: %s\n", cancelSource))
+	if elapsedMs, ok := attemptElapsedMs(attempt); ok {
+		attempt.response.WriteString(fmt.Sprintf("Elapsed Ms: %d\n", elapsedMs))
+	}
+	if firstByteMs, ok := attemptFirstByteMs(attempt); ok {
+		attempt.response.WriteString(fmt.Sprintf("First Byte Ms: %d\n", firstByteMs))
+	}
 	attempt.errorWritten = true
 
 	updateAggregatedResponse(ginCtx, attempts)
@@ -165,6 +179,9 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		attempt.headersWritten = true
 		attempt.response.WriteString("\n")
 	}
+	if attempt.firstByteAt.IsZero() {
+		attempt.firstByteAt = time.Now()
+	}
 	attempt.responseChunkCount++
 	attempt.responseChunkBytes += len(chunk)
 	if !attempt.bodySummaryWritten {
@@ -175,6 +192,44 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	attempt.response.WriteString(fmt.Sprintf("Body Bytes: %d\n", attempt.responseChunkBytes))
 
 	updateAggregatedResponse(ginCtx, attempts)
+}
+
+func classifyUpstreamError(err error) (category string, cancelSource string) {
+	if err == nil {
+		return "upstream_error", "unknown"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled", "downstream_cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline_exceeded", "upstream_deadline"
+	}
+
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(msg, "upstream_timeout:") || strings.Contains(msg, "request budget exceeded"):
+		return "request_budget_exceeded", "request_budget"
+	case strings.Contains(msg, "context canceled"):
+		return "context_canceled", "downstream_cancelled"
+	case strings.Contains(msg, "deadline exceeded"):
+		return "context_deadline_exceeded", "upstream_deadline"
+	default:
+		return "upstream_error", "unknown"
+	}
+}
+
+func attemptElapsedMs(attempt *upstreamAttempt) (int64, bool) {
+	if attempt == nil || attempt.startedAt.IsZero() {
+		return 0, false
+	}
+	return time.Since(attempt.startedAt).Milliseconds(), true
+}
+
+func attemptFirstByteMs(attempt *upstreamAttempt) (int64, bool) {
+	if attempt == nil || attempt.startedAt.IsZero() || attempt.firstByteAt.IsZero() {
+		return 0, false
+	}
+	return attempt.firstByteAt.Sub(attempt.startedAt).Milliseconds(), true
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {

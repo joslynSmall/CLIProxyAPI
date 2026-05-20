@@ -68,6 +68,7 @@ cp config.example.yaml config.yaml
 |------|------|------------|
 | `config.yaml` | 本地开发 | `./auths`（本地相对路径） |
 | `config-277.yaml` | 生产部署（227 服务器） | `/opt/cliproxy/auths` |
+| `config_hk.yaml` | 生产部署（ssh hk） | `auths`（`/home/ubuntu/cli-proxy-hk/auths`） |
 
 运行时状态持久化配置：
 
@@ -83,11 +84,15 @@ cp config.example.yaml config.yaml
 - `openai-compat-network-retry` / `openai-compat-network-retry-backoff-ms` 仅用于 `openai-compatible` executor 在“尚未收到上游响应”时吸收 `EOF`、`TLS handshake timeout` 等瞬时网络抖动。
 - 当上游已经返回 `200` 但在首个 SSE chunk 前就空流/截断时，代理现在会返回明确的 upstream truncation 错误（`502`），并附带 request-id、chunk 数、累计字节数、最后事件等诊断字段；这类错误不会被伪装成通用成功流。
 - `request-retry` 仍保留为更外层的 auth/credential 级兜底；它不负责已选定同一上游节点的短抖动吸收，两者职责边界分离。
+- `request-budget-seconds` 是单次请求（包含重试与冷却等待）的总预算。预算耗尽时会返回 `upstream_timeout: upstream request budget exceeded`，请求日志会记录 `Error Category: request_budget_exceeded` 与 `Cancel Source: request_budget`。
+- `nonstream-keepalive-interval` 控制非流式请求等待上游时写入空行的间隔，用于避免长推理请求在客户端、网关或反向代理层被误判为空闲连接。`/v1/chat/completions` 的非流式路径已接入该保活逻辑。
+- 上游请求被下游断开时，请求日志会将 `context canceled` 分类为 `Error Category: context_canceled` 与 `Cancel Source: downstream_cancelled`，用于和服务端预算超时区分。
 - 熔断“自动删模型”现已改为“候选待处理”模式：`GET /v0/management/circuit-breaker/deletions` 支持 `status` 分页过滤，`DELETE /v0/management/circuit-breaker/deletions/:id` 执行真实删除，`POST /v0/management/circuit-breaker/deletions/:id/dismiss` 用于忽略候选；`pending` 候选不自动过期，终态记录保留 30 天。
 
 - **本地开发（推荐）**：`./bin/air`（由 `.air.toml` 管理，等价于使用 `-config config.yaml` 启动）
 - **本地回退启动**：`go run ./cmd/server`
 - **生产部署**：`./cli-proxy-new -config config-277.yaml`
+- **ssh hk 生产部署**：`/home/ubuntu/cli-proxy-hk/cli-proxy-api.bin -config /home/ubuntu/cli-proxy-hk/config_hk.yaml`
 
 详细配置说明请参考 [用户手册](https://help.router-for.me/cn/)
 

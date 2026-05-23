@@ -1,5 +1,6 @@
 # Binaries
 cli-proxy-api
+cli-proxy-api.bin
 cli-proxy-new
 *.exe
 
@@ -32,6 +33,10 @@ auths/*
 
 # Documentation
 docs/*
+!docs/*.md
+!docs/technical/
+docs/technical/*
+!docs/technical/*.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -56,3 +61,4 @@ _bmad-output/*
 ._*
 cli-proxy-hk
 config_hk.yaml
+config_hk.yaml.bak.*

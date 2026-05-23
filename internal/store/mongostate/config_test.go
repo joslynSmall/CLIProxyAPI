@@ -163,3 +163,36 @@ func TestLoadRuntimeConfig_UsesConfigSpecificFile(t *testing.T) {
 		t.Fatalf("cfg.URI = %q, want mongodb://specific:27017", cfg.URI)
 	}
 }
+
+func TestResolveConfigPaths_ConfigUnderscoreSpecific(t *testing.T) {
+	paths := ResolveConfigPaths("/tmp/cliproxy/config_hk.yaml")
+	if len(paths) != 1 {
+		t.Fatalf("ResolveConfigPaths() len = %d, want 1", len(paths))
+	}
+	if paths[0] != "/tmp/cliproxy/state-store.hk.ini" {
+		t.Fatalf("ResolveConfigPaths()[0] = %q, want /tmp/cliproxy/state-store.hk.ini", paths[0])
+	}
+}
+
+func TestLoadRuntimeConfig_UsesConfigUnderscoreSpecific(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config_hk.yaml")
+	specificPath := filepath.Join(tempDir, "state-store.hk.ini")
+	if err := os.WriteFile(specificPath, []byte("[mongo]\nenabled = true\nuri = mongodb://hk-specific:27017\n"), 0o600); err != nil {
+		t.Fatalf("write state-store.hk.ini: %v", err)
+	}
+
+	cfg, path, found, err := LoadRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadRuntimeConfig() error = %v", err)
+	}
+	if !found {
+		t.Fatal("LoadRuntimeConfig() found = false, want true")
+	}
+	if path != specificPath {
+		t.Fatalf("LoadRuntimeConfig() path = %q, want %q", path, specificPath)
+	}
+	if cfg.URI != "mongodb://hk-specific:27017" {
+		t.Fatalf("cfg.URI = %q, want mongodb://hk-specific:27017", cfg.URI)
+	}
+}

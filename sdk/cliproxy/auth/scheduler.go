@@ -97,6 +97,14 @@ type childBucket struct {
 // cooldownQueue is the blocked auth collection ordered by next retry time during rebuilds.
 type cooldownQueue []*scheduledAuth
 
+type modelBlockingSummary struct {
+	total         int
+	blockedCount  int
+	cooldownCount int
+	circuitCount  int
+	earliest      time.Time
+}
+
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
@@ -351,9 +359,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
 func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, tried map[string]struct{}) error {
 	now := time.Now()
-	total := 0
-	blockedCount := 0
-	earliest := time.Time{}
+	summary := modelBlockingSummary{}
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -363,25 +369,33 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localBlockedCount, localEarliest := shard.blockingSummaryLocked(model, triedPredicate(tried))
-		total += localTotal
-		blockedCount += localBlockedCount
-		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
-			earliest = localEarliest
+		local := shard.blockingSummaryLocked(model, triedPredicate(tried))
+		summary.total += local.total
+		summary.blockedCount += local.blockedCount
+		summary.cooldownCount += local.cooldownCount
+		summary.circuitCount += local.circuitCount
+		if !local.earliest.IsZero() && (summary.earliest.IsZero() || local.earliest.Before(summary.earliest)) {
+			summary.earliest = local.earliest
 		}
 	}
-	if total == 0 {
+	if summary.total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if blockedCount == total {
+	if summary.blockedCount == summary.total {
 		resetIn := time.Duration(0)
-		if !earliest.IsZero() {
-			resetIn = earliest.Sub(now)
+		if !summary.earliest.IsZero() {
+			resetIn = summary.earliest.Sub(now)
 			if resetIn < 0 {
 				resetIn = 0
 			}
 		}
-		return newModelCooldownError(model, "", resetIn)
+		if summary.circuitCount == summary.total {
+			return newModelCircuitOpenError(model, "", resetIn)
+		}
+		if summary.cooldownCount == summary.total {
+			return newModelCooldownError(model, "", resetIn)
+		}
+		return newModelExhaustedError(model, "")
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
@@ -758,65 +772,76 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, blockedCount, earliest := m.blockingSummaryLocked(model, predicate)
-	if total == 0 {
+	summary := m.blockingSummaryLocked(model, predicate)
+	if summary.total == 0 {
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if blockedCount == total {
+	if summary.blockedCount == summary.total {
 		providerForError := provider
 		if providerForError == "mixed" {
 			providerForError = ""
 		}
 		resetIn := time.Duration(0)
-		if !earliest.IsZero() {
-			resetIn = earliest.Sub(now)
+		if !summary.earliest.IsZero() {
+			resetIn = summary.earliest.Sub(now)
 			if resetIn < 0 {
 				resetIn = 0
 			}
 		}
-		return newModelCooldownError(model, providerForError, resetIn)
+		if summary.circuitCount == summary.total {
+			return newModelCircuitOpenError(model, providerForError, resetIn)
+		}
+		if summary.cooldownCount == summary.total {
+			return newModelCooldownError(model, providerForError, resetIn)
+		}
+		return newModelExhaustedError(model, providerForError)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
 }
 
-// blockingSummaryLocked summarizes total candidates, blocked candidates (cooldown or circuit-open), and earliest retry time.
-func (m *modelScheduler) blockingSummaryLocked(model string, predicate func(*scheduledAuth) bool) (int, int, time.Time) {
+// blockingSummaryLocked summarizes total candidates and blocked reasons for one model shard.
+func (m *modelScheduler) blockingSummaryLocked(model string, predicate func(*scheduledAuth) bool) modelBlockingSummary {
 	if m == nil {
-		return 0, 0, time.Time{}
+		return modelBlockingSummary{}
 	}
 	now := time.Now()
 	modelKey := canonicalModelKey(model)
 	reg := registry.GetGlobalRegistry()
 	statusByAuth := circuitBreakerStatusByAuthForModel(reg, modelKey)
-	total := 0
-	blockedCount := 0
-	earliest := time.Time{}
+	summary := modelBlockingSummary{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		total++
+		summary.total++
 		if entry == nil || entry.auth == nil {
 			continue
 		}
 		blocked := false
 		if entry.state == scheduledStateCooldown {
 			blocked = true
-			if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
-				earliest = entry.nextRetryAt
+			summary.cooldownCount++
+			if !entry.nextRetryAt.IsZero() && (summary.earliest.IsZero() || entry.nextRetryAt.Before(summary.earliest)) {
+				summary.earliest = entry.nextRetryAt
+			}
+		} else if entry.state == scheduledStateBlocked {
+			blocked = true
+			if !entry.nextRetryAt.IsZero() && (summary.earliest.IsZero() || entry.nextRetryAt.Before(summary.earliest)) {
+				summary.earliest = entry.nextRetryAt
 			}
 		}
 		if open, recoveryAt := circuitOpenRecoveryAt(reg, statusByAuth, entry.auth.ID, modelKey, now); open {
 			blocked = true
-			if !recoveryAt.IsZero() && (earliest.IsZero() || recoveryAt.Before(earliest)) {
-				earliest = recoveryAt
+			summary.circuitCount++
+			if !recoveryAt.IsZero() && (summary.earliest.IsZero() || recoveryAt.Before(summary.earliest)) {
+				summary.earliest = recoveryAt
 			}
 		}
 		if blocked {
-			blockedCount++
+			summary.blockedCount++
 		}
 	}
-	return total, blockedCount, earliest
+	return summary
 }
 
 func circuitBreakerStatusByAuthForModel(reg *registry.ModelRegistry, model string) map[string]registry.CircuitBreakerStatus {

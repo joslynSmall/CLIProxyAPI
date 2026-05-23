@@ -69,11 +69,14 @@ Timeout and cancellation diagnostics:
 - `request-budget-seconds` is the total per-request budget, including retry and cooldown time. When it is exhausted, the proxy returns `upstream_timeout: upstream request budget exceeded` and request logs include `Error Category: request_budget_exceeded` and `Cancel Source: request_budget`.
 - `nonstream-keepalive-interval` emits blank lines while non-streaming requests wait for upstream responses. The non-streaming `/v1/chat/completions` path uses this keep-alive to reduce idle disconnects from clients, gateways, and reverse proxies during long reasoning requests.
 - Downstream disconnects that cancel upstream requests are logged as `Error Category: context_canceled` and `Cancel Source: downstream_cancelled`, so they can be distinguished from server-side request budget timeouts.
+- `http-429-routing` (top-level) unifies 429 routing strategy across **all** providers (codex, claude, gemini, vertex, openai-compatibility). It supports a global default (`same-model-failover: true`, `routing-policy: immediate_failover`) and per-provider `overrides` (optionally scoped by `provider-key` for openai-compat sub-providers). The legacy per-provider fields `same-model-failover` / `429-routing-policy` under `openai-compatibility` entries remain supported and take the highest priority. Resolution order: auth attributes > provider override > global default > built-in fallback.
 
 - **Local development (recommended)**: `./bin/air` (managed by `.air.toml`, equivalent to running with `-config config.yaml`)
 - **Fallback local run**: `go run ./cmd/server`
 - **Production deployment**: `./cli-proxy-new -config config-277.yaml`
 - **ssh hk production deployment**: `/home/ubuntu/cli-proxy-hk/cli-proxy-api.bin -config /home/ubuntu/cli-proxy-hk/config_hk.yaml`
+
+For `ssh hk` deployments, do not overwrite production with a stale repo copy of `config_hk.yaml`. Pull `/home/ubuntu/cli-proxy-hk/config_hk.yaml` to local first, modify on top of that production snapshot, then upload it back.
 
 For detailed configuration options, see the [User Manual](https://help.router-for.me/cn/).
 
@@ -145,6 +148,10 @@ go test -v -run TestFunctionName ./package/
 - Advanced: [docs/sdk-advanced.md](docs/sdk-advanced.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
+
+## Technical Docs
+
+- Global business swimlane: [docs/technical/global-business-swimlane.md](docs/technical/global-business-swimlane.md)
 
 ## Contributing
 

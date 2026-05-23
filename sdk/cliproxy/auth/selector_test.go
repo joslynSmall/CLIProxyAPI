@@ -281,6 +281,49 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	})
 }
 
+func TestSelectorPick_AllBlockedWithoutCooldownReturnsModelExhaustedError(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	now := time.Now()
+	auths := []*Auth{
+		{
+			ID: "a",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(5 * time.Minute),
+				},
+			},
+		},
+		{
+			ID: "b",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(6 * time.Minute),
+				},
+			},
+		},
+	}
+
+	selector := &FillFirstSelector{}
+	_, err := selector.Pick(context.Background(), "mixed", model, cliproxyexecutor.Options{}, auths)
+	if err == nil {
+		t.Fatal("Pick() error = nil")
+	}
+
+	var exhaustedErr *modelExhaustedError
+	if !errors.As(err, &exhaustedErr) {
+		t.Fatalf("Pick() error = %T, want *modelExhaustedError", err)
+	}
+	if exhaustedErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode() = %d, want %d", exhaustedErr.StatusCode(), http.StatusServiceUnavailable)
+	}
+}
+
 func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
 	t.Parallel()
 

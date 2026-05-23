@@ -74,6 +74,8 @@ const (
 var quotaCooldownDisabled atomic.Bool
 var openAIResponsesBootstrapTimeout = 10 * time.Second
 
+const http429RetryPinnedAuthMetadataKey = "cliproxy_http_429_retry_pinned_auth_id"
+
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -533,7 +535,15 @@ func isAvailabilityFailure(err error) bool {
 		}
 	}
 	var cooldownErr *modelCooldownError
-	return errors.As(err, &cooldownErr)
+	if errors.As(err, &cooldownErr) {
+		return true
+	}
+	var circuitErr *modelCircuitOpenError
+	if errors.As(err, &circuitErr) {
+		return true
+	}
+	var exhaustedErr *modelExhaustedError
+	return errors.As(err, &exhaustedErr)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -1419,6 +1429,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	opts = ensureRequestedModelMetadata(opts, req.Model)
+	defer clearHTTP429RetryPinnedAuth(opts.Metadata)
 	resetExecutionSelectionMetadata(opts.Metadata)
 	if _, _, ok := m.availabilitySuppressionForRequest(opts.Metadata, normalized); ok {
 		m.markAvailabilityCacheHit(opts.Metadata)
@@ -1465,6 +1476,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	opts = ensureRequestedModelMetadata(opts, req.Model)
+	defer clearHTTP429RetryPinnedAuth(opts.Metadata)
 	resetExecutionSelectionMetadata(opts.Metadata)
 	if _, _, ok := m.availabilitySuppressionForRequest(opts.Metadata, normalized); ok {
 		m.markAvailabilityCacheHit(opts.Metadata)
@@ -1511,6 +1523,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	opts = ensureRequestedModelMetadata(opts, req.Model)
+	defer clearHTTP429RetryPinnedAuth(opts.Metadata)
 	resetExecutionSelectionMetadata(opts.Metadata)
 	if _, _, ok := m.availabilitySuppressionForRequest(opts.Metadata, normalized); ok {
 		m.markAvailabilityCacheHit(opts.Metadata)
@@ -1636,6 +1649,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
+			if m.shouldPauseOnHTTP429(auth, opts, authErr) {
+				return cliproxyexecutor.Response{}, authErr
+			}
 			lastErr = authErr
 			continue
 		}
@@ -1724,6 +1740,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
+			if m.shouldPauseOnHTTP429(auth, opts, authErr) {
+				return cliproxyexecutor.Response{}, authErr
+			}
 			lastErr = authErr
 			continue
 		}
@@ -1783,6 +1802,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errCtx
 			}
 			if isRequestInvalidError(errStream) {
+				return nil, errStream
+			}
+			if m.shouldPauseOnHTTP429(auth, opts, errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -1857,6 +1879,129 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 		return strings.TrimSpace(string(val))
 	default:
 		return ""
+	}
+}
+
+func http429RetryPinnedAuthIDFromMetadata(meta map[string]any) string {
+	return metadataString(meta, http429RetryPinnedAuthMetadataKey)
+}
+
+func setHTTP429RetryPinnedAuth(meta map[string]any, authID string) {
+	if len(meta) == 0 {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	meta[cliproxyexecutor.PinnedAuthMetadataKey] = authID
+	meta[http429RetryPinnedAuthMetadataKey] = authID
+}
+
+func clearHTTP429RetryPinnedAuth(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	pinnedByPolicy := http429RetryPinnedAuthIDFromMetadata(meta)
+	if pinnedByPolicy != "" && pinnedAuthIDFromMetadata(meta) == pinnedByPolicy {
+		delete(meta, cliproxyexecutor.PinnedAuthMetadataKey)
+	}
+	delete(meta, http429RetryPinnedAuthMetadataKey)
+}
+
+func authProviderRoutingScope(auth *Auth) (string, string) {
+	if auth == nil {
+		return "", ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := ""
+	if auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
+			providerKey = strings.ToLower(v)
+		}
+		if provider == "" {
+			if v := strings.TrimSpace(auth.Attributes["compat_name"]); v != "" {
+				provider = strings.ToLower(v)
+			}
+		}
+	}
+	return provider, providerKey
+}
+
+func (m *Manager) sameModelFailoverEnabledForAuth(auth *Auth) bool {
+	if auth == nil {
+		return true
+	}
+	if auth.Attributes != nil {
+		if raw := strings.TrimSpace(auth.Attributes["same_model_failover"]); raw != "" {
+			parsed, err := strconv.ParseBool(raw)
+			if err == nil {
+				return parsed
+			}
+		}
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return true
+	}
+	provider, providerKey := authProviderRoutingScope(auth)
+	if smf, _, found := cfg.HTTP429Routing.ResolveOverride(provider, providerKey); found {
+		return smf
+	}
+	return cfg.HTTP429Routing.SameModelFailoverOrDefault()
+}
+
+func (m *Manager) http429RoutingPolicyForAuth(auth *Auth) string {
+	if auth == nil {
+		return internalconfig.HTTP429RoutingPolicyImmediateFailover
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"http_429_routing_policy", "429_routing_policy"} {
+			if raw := strings.TrimSpace(auth.Attributes[key]); raw != "" {
+				return internalconfig.NormalizeHTTP429RoutingPolicy(raw)
+			}
+		}
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return internalconfig.HTTP429RoutingPolicyImmediateFailover
+	}
+	provider, providerKey := authProviderRoutingScope(auth)
+	if _, rp, found := cfg.HTTP429Routing.ResolveOverride(provider, providerKey); found {
+		return rp
+	}
+	return cfg.HTTP429Routing.RoutingPolicyOrDefault()
+}
+
+func (m *Manager) shouldPauseOnHTTP429(auth *Auth, opts cliproxyexecutor.Options, err error) bool {
+	clearOnReturn := true
+	defer func() {
+		if clearOnReturn {
+			clearHTTP429RetryPinnedAuth(opts.Metadata)
+		}
+	}()
+
+	if statusCodeFromError(err) != http.StatusTooManyRequests {
+		return false
+	}
+	if auth == nil {
+		return false
+	}
+	if !m.sameModelFailoverEnabledForAuth(auth) {
+		setHTTP429RetryPinnedAuth(opts.Metadata, auth.ID)
+		clearOnReturn = false
+		return true
+	}
+	switch m.http429RoutingPolicyForAuth(auth) {
+	case internalconfig.HTTP429RoutingPolicyFailoverAfterCooldownWindow:
+		if pinnedAuthIDFromMetadata(opts.Metadata) == auth.ID && http429RetryPinnedAuthIDFromMetadata(opts.Metadata) == auth.ID {
+			return false
+		}
+		setHTTP429RetryPinnedAuth(opts.Metadata, auth.ID)
+		clearOnReturn = false
+		return true
+	default:
+		return false
 	}
 }
 
@@ -3057,7 +3202,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 					resetIn = 0
 				}
 			}
-			return nil, nil, newModelCooldownError(model, provider, resetIn)
+			return nil, nil, newModelCircuitOpenError(model, provider, resetIn)
 		}
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -3201,7 +3346,7 @@ func (m *Manager) pickNextMixedLegacyOnce(ctx context.Context, providers []strin
 					resetIn = 0
 				}
 			}
-			return nil, nil, "", newModelCooldownError(model, "", resetIn)
+			return nil, nil, "", newModelCircuitOpenError(model, "", resetIn)
 		}
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}

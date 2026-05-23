@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -156,6 +157,175 @@ func (e *authScopedOpenAICompatPoolExecutor) ExecuteCalls() []string {
 	out := make([]string, len(e.executeCalls))
 	copy(out, e.executeCalls)
 	return out
+}
+
+type retryAfterStatusError struct {
+	status     int
+	message    string
+	retryAfter time.Duration
+}
+
+func (e *retryAfterStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func (e *retryAfterStatusError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.status
+}
+
+func (e *retryAfterStatusError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return &e.retryAfter
+}
+
+type scriptedOpenAICompatExecutor struct {
+	id string
+
+	mu           sync.Mutex
+	executeCalls []string
+	streamCalls  []string
+	countCalls   []string
+	executeSteps map[string][]error
+	streamSteps  map[string][]error
+	countSteps   map[string][]error
+}
+
+func (e *scriptedOpenAICompatExecutor) Identifier() string { return e.id }
+
+func (e *scriptedOpenAICompatExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	call := auth.ID + "|" + req.Model
+	e.mu.Lock()
+	e.executeCalls = append(e.executeCalls, call)
+	var err error
+	if seq := e.executeSteps[auth.ID]; len(seq) > 0 {
+		err = seq[0]
+		e.executeSteps[auth.ID] = seq[1:]
+	}
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(call)}, nil
+}
+
+func (e *scriptedOpenAICompatExecutor) ExecuteStream(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	call := auth.ID + "|" + req.Model
+	e.mu.Lock()
+	e.streamCalls = append(e.streamCalls, call)
+	var err error
+	if seq := e.streamSteps[auth.ID]; len(seq) > 0 {
+		err = seq[0]
+		e.streamSteps[auth.ID] = seq[1:]
+	}
+	e.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(call)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Model": {req.Model}}, Chunks: ch}, nil
+}
+
+func (e *scriptedOpenAICompatExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *scriptedOpenAICompatExecutor) CountTokens(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	call := auth.ID + "|" + req.Model
+	e.mu.Lock()
+	e.countCalls = append(e.countCalls, call)
+	var err error
+	if seq := e.countSteps[auth.ID]; len(seq) > 0 {
+		err = seq[0]
+		e.countSteps[auth.ID] = seq[1:]
+	}
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(call)}, nil
+}
+
+func (e *scriptedOpenAICompatExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "HttpRequest not implemented"}
+}
+
+func (e *scriptedOpenAICompatExecutor) ExecuteCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.executeCalls))
+	copy(out, e.executeCalls)
+	return out
+}
+
+func (e *scriptedOpenAICompatExecutor) StreamCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.streamCalls))
+	copy(out, e.streamCalls)
+	return out
+}
+
+func (e *scriptedOpenAICompatExecutor) CountCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.countCalls))
+	copy(out, e.countCalls)
+	return out
+}
+
+func newDualOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor ProviderExecutor, authOverrides ...map[string]string) (*Manager, []string) {
+	t.Helper()
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name:   "pool",
+			Models: models,
+		}},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+	m.RegisterExecutor(executor)
+	m.SetRetryConfig(3, 50*time.Millisecond, 8)
+
+	authIDs := make([]string, 0, len(authOverrides))
+	reg := registry.GetGlobalRegistry()
+	for idx, overrides := range authOverrides {
+		attrs := map[string]string{
+			"api_key":      "test-key",
+			"compat_name":  "pool",
+			"provider_key": "pool",
+		}
+		for key, value := range overrides {
+			attrs[key] = value
+		}
+		auth := &Auth{
+			ID:         "pool-auth-" + strings.ToLower(string(rune('a'+idx))) + "-" + t.Name(),
+			Provider:   "pool",
+			Status:     StatusActive,
+			Attributes: attrs,
+		}
+		if _, err := m.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %d: %v", idx, err)
+		}
+		reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+		m.RefreshSchedulerEntry(auth.ID)
+		authIDs = append(authIDs, auth.ID)
+	}
+	t.Cleanup(func() {
+		for _, authID := range authIDs {
+			reg.UnregisterClient(authID)
+		}
+	})
+	return m, authIDs
 }
 
 func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
@@ -406,6 +576,160 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackWithinSameAuth(t *testing.
 		if got[i] != want[i] {
 			t.Fatalf("execute call %d model = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestManagerExecute_OpenAICompat429SameModelFailoverDisabledRetriesSameAuth(t *testing.T) {
+	alias := "claude-opus-4.66"
+	retryable429 := &retryAfterStatusError{
+		status:     http.StatusTooManyRequests,
+		message:    "quota",
+		retryAfter: 5 * time.Millisecond,
+	}
+	executor := &scriptedOpenAICompatExecutor{
+		id: "pool",
+		executeSteps: map[string][]error{
+			"pool-auth-a-" + t.Name(): {retryable429},
+		},
+	}
+	m, authIDs := newDualOpenAICompatPoolTestManager(
+		t,
+		alias,
+		[]internalconfig.OpenAICompatibilityModel{{Name: "deepseek-v4-pro", Alias: alias}},
+		executor,
+		map[string]string{"same_model_failover": "false"},
+		map[string]string{},
+	)
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{}}
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, opts)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != authIDs[0]+"|deepseek-v4-pro" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), authIDs[0]+"|deepseek-v4-pro")
+	}
+	got := executor.ExecuteCalls()
+	want := []string{
+		authIDs[0] + "|deepseek-v4-pro",
+		authIDs[0] + "|deepseek-v4-pro",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if pinned := pinnedAuthIDFromMetadata(opts.Metadata); pinned != "" {
+		t.Fatalf("pinned auth metadata = %q, want empty", pinned)
+	}
+	if pinned := http429RetryPinnedAuthIDFromMetadata(opts.Metadata); pinned != "" {
+		t.Fatalf("429 retry pin metadata = %q, want empty", pinned)
+	}
+}
+
+func TestManagerExecute_OpenAICompat429FailoverAfterCooldownWindowFallsBackOnSecond429(t *testing.T) {
+	alias := "claude-opus-4.66"
+	retryable429 := &retryAfterStatusError{
+		status:     http.StatusTooManyRequests,
+		message:    "quota",
+		retryAfter: 5 * time.Millisecond,
+	}
+	executor := &scriptedOpenAICompatExecutor{
+		id: "pool",
+		executeSteps: map[string][]error{
+			"pool-auth-a-" + t.Name(): {retryable429, retryable429},
+		},
+	}
+	m, authIDs := newDualOpenAICompatPoolTestManager(
+		t,
+		alias,
+		[]internalconfig.OpenAICompatibilityModel{{Name: "deepseek-v4-pro", Alias: alias}},
+		executor,
+		map[string]string{"http_429_routing_policy": internalconfig.HTTP429RoutingPolicyFailoverAfterCooldownWindow},
+		map[string]string{},
+	)
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{}}
+	resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, opts)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if string(resp.Payload) != authIDs[1]+"|deepseek-v4-pro" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), authIDs[1]+"|deepseek-v4-pro")
+	}
+	got := executor.ExecuteCalls()
+	want := []string{
+		authIDs[0] + "|deepseek-v4-pro",
+		authIDs[0] + "|deepseek-v4-pro",
+		authIDs[1] + "|deepseek-v4-pro",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if pinned := pinnedAuthIDFromMetadata(opts.Metadata); pinned != "" {
+		t.Fatalf("pinned auth metadata = %q, want empty", pinned)
+	}
+	if pinned := http429RetryPinnedAuthIDFromMetadata(opts.Metadata); pinned != "" {
+		t.Fatalf("429 retry pin metadata = %q, want empty", pinned)
+	}
+}
+
+func TestManagerExecuteStream_OpenAICompat429SameModelFailoverDisabledRetriesSameAuth(t *testing.T) {
+	alias := "claude-opus-4.66"
+	retryable429 := &retryAfterStatusError{
+		status:     http.StatusTooManyRequests,
+		message:    "quota",
+		retryAfter: 5 * time.Millisecond,
+	}
+	executor := &scriptedOpenAICompatExecutor{
+		id: "pool",
+		streamSteps: map[string][]error{
+			"pool-auth-a-" + t.Name(): {retryable429},
+		},
+	}
+	m, authIDs := newDualOpenAICompatPoolTestManager(
+		t,
+		alias,
+		[]internalconfig.OpenAICompatibilityModel{{Name: "deepseek-v4-pro", Alias: alias}},
+		executor,
+		map[string]string{"same_model_failover": "false"},
+		map[string]string{},
+	)
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{}}
+	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, opts)
+	if err != nil {
+		t.Fatalf("execute stream: %v", err)
+	}
+	if payload := readOpenAICompatStreamPayload(t, streamResult); payload != authIDs[0]+"|deepseek-v4-pro" {
+		t.Fatalf("payload = %q, want %q", payload, authIDs[0]+"|deepseek-v4-pro")
+	}
+	got := executor.StreamCalls()
+	want := []string{
+		authIDs[0] + "|deepseek-v4-pro",
+		authIDs[0] + "|deepseek-v4-pro",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if pinned := pinnedAuthIDFromMetadata(opts.Metadata); pinned != "" {
+		t.Fatalf("pinned auth metadata = %q, want empty", pinned)
+	}
+	if pinned := http429RetryPinnedAuthIDFromMetadata(opts.Metadata); pinned != "" {
+		t.Fatalf("429 retry pin metadata = %q, want empty", pinned)
 	}
 }
 

@@ -85,6 +85,11 @@ func ResolveConfigPaths(configFilePath string) []string {
 		if suffix != "" {
 			addCandidate("state-store." + suffix + ".ini")
 		}
+	case strings.HasPrefix(base, "config_") && strings.HasSuffix(base, ".yaml"):
+		suffix := strings.TrimSuffix(strings.TrimPrefix(base, "config_"), ".yaml")
+		if suffix != "" {
+			addCandidate("state-store." + suffix + ".ini")
+		}
 	default:
 		addCandidate(ConfigFileName)
 	}

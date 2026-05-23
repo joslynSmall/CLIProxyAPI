@@ -154,6 +154,10 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// HTTP429Routing 定义所有 provider 共用的 429 路由默认策略与 provider 级覆盖。
+	// openai-compatibility 单项上的旧字段仍然保留最高优先级语义。
+	HTTP429Routing HTTP429RoutingConfig `yaml:"http-429-routing" json:"http-429-routing"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -237,7 +241,113 @@ const (
 	ProviderRateLimitScopeProviderModel = "provider-model"
 	ProviderRateLimitModeAuto           = "auto"
 	ProviderRateLimitModeManual         = "manual"
+	HTTP429RoutingPolicyImmediateFailover          = "immediate_failover"
+	HTTP429RoutingPolicyFailoverAfterCooldownWindow = "failover_after_cooldown_window"
 )
+
+func NormalizeHTTP429RoutingPolicy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", HTTP429RoutingPolicyImmediateFailover:
+		return HTTP429RoutingPolicyImmediateFailover
+	case HTTP429RoutingPolicyFailoverAfterCooldownWindow:
+		return HTTP429RoutingPolicyFailoverAfterCooldownWindow
+	default:
+		return HTTP429RoutingPolicyImmediateFailover
+	}
+}
+
+// HTTP429RoutingConfig 定义 429 路由策略的全局默认值和按 provider 维度的覆盖。
+type HTTP429RoutingConfig struct {
+	// SameModelFailover 控制重试性上游失败后是否允许切换到同模型的其他 auth/provider。
+	// 默认 true。
+	SameModelFailover *bool `yaml:"same-model-failover,omitempty" json:"same-model-failover,omitempty"`
+
+	// RoutingPolicy 定义上游 HTTP 429 后的路由行为。
+	// 支持: immediate_failover / failover_after_cooldown_window。
+	// 默认 immediate_failover。
+	RoutingPolicy string `yaml:"routing-policy,omitempty" json:"routing-policy,omitempty"`
+
+	// Overrides 按 provider 维度覆盖上述默认值。
+	Overrides []HTTP429RoutingOverride `yaml:"overrides,omitempty" json:"overrides,omitempty"`
+}
+
+// SameModelFailoverOrDefault 返回 same-model-failover 的生效值。
+func (c HTTP429RoutingConfig) SameModelFailoverOrDefault() bool {
+	if c.SameModelFailover == nil {
+		return true
+	}
+	return *c.SameModelFailover
+}
+
+// RoutingPolicyOrDefault 返回 429 routing-policy 的生效值。
+func (c HTTP429RoutingConfig) RoutingPolicyOrDefault() string {
+	return NormalizeHTTP429RoutingPolicy(c.RoutingPolicy)
+}
+
+// HTTP429RoutingOverride 按 provider 维度覆盖 429 路由策略。
+// provider-key 为可选项，用于精确匹配 openai-compat 子 provider。
+type HTTP429RoutingOverride struct {
+	Provider          string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	ProviderKey       string `yaml:"provider-key,omitempty" json:"provider-key,omitempty"`
+	SameModelFailover *bool  `yaml:"same-model-failover,omitempty" json:"same-model-failover,omitempty"`
+	RoutingPolicy     string `yaml:"routing-policy,omitempty" json:"routing-policy,omitempty"`
+}
+
+// ResolveOverride 用 auth 的 provider/provider_key 查找命中的 override，
+// 返回 (sameModelFailover, routingPolicy, found)。
+// found 为 false 表示无可匹配覆盖。
+func (c HTTP429RoutingConfig) ResolveOverride(provider, providerKey string) (bool, string, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
+	var providerOnly *HTTP429RoutingOverride
+	for i := range c.Overrides {
+		ov := c.Overrides[i]
+		if strings.ToLower(strings.TrimSpace(ov.Provider)) != provider {
+			continue
+		}
+		ovPK := strings.ToLower(strings.TrimSpace(ov.ProviderKey))
+		if ovPK == "" {
+			if providerOnly == nil {
+				providerOnly = &ov
+			}
+			continue
+		}
+		if providerKey == "" || ovPK != providerKey {
+			continue
+		}
+		smf := true
+		if ov.SameModelFailover != nil {
+			smf = *ov.SameModelFailover
+		}
+		rp := NormalizeHTTP429RoutingPolicy(ov.RoutingPolicy)
+		return smf, rp, true
+	}
+	if providerOnly != nil {
+		smf := true
+		if providerOnly.SameModelFailover != nil {
+			smf = *providerOnly.SameModelFailover
+		}
+		rp := NormalizeHTTP429RoutingPolicy(providerOnly.RoutingPolicy)
+		return smf, rp, true
+	}
+	return false, "", false
+}
+
+// NormalizeHTTP429RoutingConfig 校验并归一化 HTTP429RoutingConfig。
+func NormalizeHTTP429RoutingConfig(input HTTP429RoutingConfig) HTTP429RoutingConfig {
+	out := input
+	if out.SameModelFailover == nil {
+		out.SameModelFailover = boolPtr(true)
+	}
+	out.RoutingPolicy = NormalizeHTTP429RoutingPolicy(out.RoutingPolicy)
+	for i := range out.Overrides {
+		ov := &out.Overrides[i]
+		ov.Provider = strings.ToLower(strings.TrimSpace(ov.Provider))
+		ov.ProviderKey = strings.ToLower(strings.TrimSpace(ov.ProviderKey))
+		ov.RoutingPolicy = NormalizeHTTP429RoutingPolicy(ov.RoutingPolicy)
+	}
+	return out
+}
 
 // ProviderRateLimitConfig defines global and override limits for upstream provider requests.
 type ProviderRateLimitConfig struct {
@@ -757,6 +867,17 @@ type OpenAICompatibility struct {
 	// Headers optionally adds extra HTTP headers for requests sent to this provider.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 
+	// SameModelFailover controls whether the router may switch to another auth/provider
+	// for the same requested model after a retryable upstream failure. Defaults to true.
+	SameModelFailover *bool `yaml:"same-model-failover,omitempty" json:"same-model-failover,omitempty"`
+
+	// HTTP429RoutingPolicy defines how the router should behave after upstream HTTP 429
+	// for this provider. Supported values:
+	//   - immediate_failover
+	//   - failover_after_cooldown_window
+	// Defaults to immediate_failover.
+	HTTP429RoutingPolicy string `yaml:"429-routing-policy,omitempty" json:"429-routing-policy,omitempty"`
+
 	// CircuitBreakerFailureThreshold sets the number of consecutive failures required to open
 	// the circuit breaker for a credential-model pair. A value of 0 uses the runtime default.
 	CircuitBreakerFailureThreshold int `yaml:"circuit-breaker-failure-threshold,omitempty" json:"circuit-breaker-failure-threshold,omitempty"`
@@ -945,6 +1066,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.OpenAICompatNetworkRetryBackoffMS < 0 {
 		cfg.OpenAICompatNetworkRetryBackoffMS = 0
 	}
+	cfg.HTTP429Routing = NormalizeHTTP429RoutingConfig(cfg.HTTP429Routing)
 	normalizedRateLimitCfg, errRateLimit := normalizeProviderRateLimitConfig(cfg.ProviderRateLimit, false)
 	if errRateLimit != nil {
 		return nil, fmt.Errorf("invalid provider-rate-limit: %w", errRateLimit)

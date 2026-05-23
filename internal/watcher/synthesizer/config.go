@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -70,6 +71,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(entry.Headers, attrs)
+		injectHTTP429RoutingAttrs(cfg, attrs, "gemini", "")
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
@@ -117,6 +119,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		injectHTTP429RoutingAttrs(cfg, attrs, "claude", "")
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -167,6 +170,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(ck.Headers, attrs)
+		injectHTTP429RoutingAttrs(cfg, attrs, "codex", "")
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -218,6 +222,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
+			injectHTTP429RoutingAttrs(cfg, attrs, "openai-compatibility", compat.Name)
+			if compat.SameModelFailover != nil {
+				attrs["same_model_failover"] = strconv.FormatBool(*compat.SameModelFailover)
+			}
+			if policy := internalconfig.NormalizeHTTP429RoutingPolicy(compat.HTTP429RoutingPolicy); policy != "" {
+				attrs["http_429_routing_policy"] = policy
+			}
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -251,6 +262,13 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			injectHTTP429RoutingAttrs(cfg, attrs, "openai-compatibility", compat.Name)
+			if compat.SameModelFailover != nil {
+				attrs["same_model_failover"] = strconv.FormatBool(*compat.SameModelFailover)
+			}
+			if policy := internalconfig.NormalizeHTTP429RoutingPolicy(compat.HTTP429RoutingPolicy); policy != "" {
+				attrs["http_429_routing_policy"] = policy
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
@@ -304,6 +322,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			attrs["models_hash"] = hash
 		}
 		addConfigHeadersToAttrs(compat.Headers, attrs)
+		injectHTTP429RoutingAttrs(cfg, attrs, "vertex", "")
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
@@ -319,4 +338,32 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		out = append(out, a)
 	}
 	return out
+}
+
+// injectHTTP429RoutingAttrs 向 attrs 注入来自全局配置或 provider override 的 429 路由策略。
+// 仅在 attrs 中不存在对应键时才注入，以保证 provider 局部配置优先。
+func injectHTTP429RoutingAttrs(cfg *internalconfig.Config, attrs map[string]string, provider string, providerKey string) {
+	if cfg == nil || attrs == nil {
+		return
+	}
+	_, hasSMF := attrs["same_model_failover"]
+	_, hasHRP := attrs["http_429_routing_policy"]
+	if hasSMF && hasHRP {
+		return
+	}
+	if smf, rp, found := cfg.HTTP429Routing.ResolveOverride(provider, providerKey); found {
+		if !hasSMF {
+			attrs["same_model_failover"] = strconv.FormatBool(smf)
+		}
+		if !hasHRP {
+			attrs["http_429_routing_policy"] = rp
+		}
+		return
+	}
+	if !hasSMF {
+		attrs["same_model_failover"] = strconv.FormatBool(cfg.HTTP429Routing.SameModelFailoverOrDefault())
+	}
+	if !hasHRP {
+		attrs["http_429_routing_policy"] = cfg.HTTP429Routing.RoutingPolicyOrDefault()
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -325,6 +326,36 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// SameModelFailoverEnabled reports whether this auth may fail over to another
+// auth/provider for the same requested model after a retryable upstream error.
+// Defaults to true.
+func (a *Auth) SameModelFailoverEnabled() bool {
+	if a == nil || a.Attributes == nil {
+		return true
+	}
+	if raw := strings.TrimSpace(a.Attributes["same_model_failover"]); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed
+		}
+	}
+	return true
+}
+
+// HTTP429RoutingPolicy returns the auth-scoped routing policy applied after an
+// upstream HTTP 429. Defaults to immediate_failover.
+func (a *Auth) HTTP429RoutingPolicy() string {
+	if a == nil || a.Attributes == nil {
+		return internalconfig.HTTP429RoutingPolicyImmediateFailover
+	}
+	for _, key := range []string{"http_429_routing_policy", "429_routing_policy"} {
+		if raw := strings.TrimSpace(a.Attributes[key]); raw != "" {
+			return internalconfig.NormalizeHTTP429RoutingPolicy(raw)
+		}
+	}
+	return internalconfig.HTTP429RoutingPolicyImmediateFailover
 }
 
 func parseBoolAny(val any) (bool, bool) {

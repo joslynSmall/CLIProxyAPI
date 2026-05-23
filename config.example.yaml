@@ -36,13 +36,30 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # API 密钥条目列表(用于认证，可选限制供应商/模型范围)
+# allowed-suppliers: 限制该密钥只能访问指定供应商（精确匹配 provider name）。
+# allowed-models: 限制该密钥只能访问指定模型（支持通配符，如 "gpt-*"）。
 api-key-entries:
   - api-key: "your-api-key-1"
+  # allowed-suppliers:
+  #   - "codex"
+  #   - "openai-compatibility"
+  # allowed-models:
+  #   - "gpt-5.4"
+  #   - "gpt-5.3-*"
   - api-key: "your-api-key-2"
   - api-key: "your-api-key-3"
 
 # 启用调试日志
 debug: false
+
+# 为 true 时，启用请求日志（写入 logs/request-YYYY-MM-DD.log）。
+# 请求日志包含模型、凭据、耗时、错误分类等结构化字段。
+request-log: false
+
+# 为 true 时，禁用凭据配额冷却调度。
+# 正常情况下当凭据被上游标记为配额耗尽时，系统会自动安排冷却期；
+# 设为 true 后跳过冷却，直接尝试下一个可用凭据。
+disable-cooling: false
 
 # 启用 pprof HTTP 调试服务器(host:port)。为安全起见建议绑定 localhost。
 pprof:
@@ -104,6 +121,10 @@ openai-compat-network-retry-backoff-ms: 500
 #   - provider: 按 provider 维度限流（同 provider 下共享配额）
 provider-rate-limit:
   enabled: true
+  # scope: 限流维度
+  #   - credential: 按凭据维度限流（推荐）
+  #   - provider: 按 provider 维度限流（同 provider 下共享配额）
+  #   - provider-model: 按 provider+模型 维度限流
   scope: credential
   rate-limit: 40
   rate-window-seconds: 60
@@ -111,6 +132,53 @@ provider-rate-limit:
   reactive-base-delay-ms: 1000
   reactive-max-delay-seconds: 60
   reactive-jitter-ms: 300
+  # 自适应限流：根据上游 429/成功反馈自动调整限流窗口。
+  # adaptive-enabled: 是否启用自适应限流（默认 true）。
+  # adaptive-increase-on-success: 成功时是否主动提升限流（默认 false）。
+  # adaptive-decrease-factor: 降速时的乘数因子（默认 0.8）。
+  # adaptive-min-rate-limit: 自适应降速后的最低限流值（默认 1）。
+  # adaptive-persist-debounce-seconds: 持久化自适应状态前的防抖秒数（默认 2）。
+  # adaptive-enabled: true
+  # adaptive-increase-on-success: false
+  # adaptive-decrease-factor: 0.8
+  # adaptive-min-rate-limit: 1
+  # adaptive-persist-debounce-seconds: 2
+  # 按 provider/auth-id/model 维度覆盖全局限流设置。
+  # mode: "auto"(自动调整) 或 "manual"(仅使用指定值)。
+  # overrides:
+  #   - provider: openai-compatibility
+  #     auth-id: "openai-compatibility:某provider:hash"
+  #     model: deepseek-v4-pro
+  #     mode: auto
+  #     scope: credential
+  #     rate-limit: 9
+  #   - provider: codex
+  #     enabled: false
+
+# 全局 HTTP 429 路由策略（所有 provider 共用）。
+# same-model-failover: 重试性上游失败后是否允许切换到同模型的其他 auth/provider（默认 true）。
+# routing-policy: 上游 HTTP 429 后的路由行为（默认 immediate_failover）。
+#   - immediate_failover: 立即切换到下一个 auth/provider。
+#   - failover_after_cooldown_window: 暂停当前 auth，等待冷却窗口后重试同一 auth。
+# overrides: 按 provider 维度覆盖全局默认值。provider-key 可选，用于 openai-compat 子 provider 精确匹配。
+# 旧字段 openai-compatibility.*.same-model-failover / 429-routing-policy 仍保留最高优先级。
+# http-429-routing:
+#   same-model-failover: true
+#   routing-policy: immediate_failover
+#   overrides:
+#     - provider: codex
+#       same-model-failover: true
+#       routing-policy: failover_after_cooldown_window
+#     - provider: openai-compatibility
+#       provider-key: n卡
+#       same-model-failover: true
+#       routing-policy: failover_after_cooldown_window
+
+# 熔断器自动移除：当同一 auth+模型对反复进入 OPEN 状态时，自动从模型列表中移除。
+# auto-remove-threshold: 达到多少次 OPEN 周期后触发自动移除（默认 3）。
+# circuit-breaker-auto-removal:
+#   enabled: true
+#   auto-remove-threshold: 3
 
 # 入口层缺省思考深度策略（仅针对标准入口协议）
 # 可通过管理 API 实时更新并写回当前运行配置。
@@ -153,6 +221,7 @@ nonstream-keepalive-interval: 0
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
 #     prefix: "test" # 可选: 需要类似 "test/gemini-3-pro-preview" 的调用来定位此凭据
+#     priority: 100  # 可选: 凭据选择优先级，数值越高越优先（默认 0）
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -172,6 +241,7 @@ nonstream-keepalive-interval: 0
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # 可选: 需要类似 "test/gpt-5-codex" 的调用来定位此凭据
+#     priority: 100  # 可选: 凭据选择优先级，数值越高越优先（默认 0）
 #     base-url: "https://www.example.com" # 使用自定义 codex API 端点
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -193,6 +263,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..." # 使用官方 claude API 密钥，无需设置 base url
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # 可选: 需要类似 "test/claude-sonnet-latest" 的调用来定位此凭据
+#     priority: 100  # 可选: 凭据选择优先级，数值越高越优先（默认 0）
 #     base-url: "https://www.example.com" # 使用自定义 claude API 端点
 #     headers:
 #       X-Custom-Header: "custom-value"
@@ -243,11 +314,14 @@ nonstream-keepalive-interval: 0
 # openai-compatibility:
 #   - name: "openrouter" # 提供商名称; 将在用户代理等其他地方使用
 #     prefix: "test" # 可选: 需要类似 "test/kimi-k2" 的调用来定位此提供商的凭据
+#     priority: 100  # 可选: 凭据选择优先级，数值越高越优先（默认 0）
 #     base-url: "https://openrouter.ai/api/v1" # 提供商的 base URL
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     # circuit-breaker-failure-threshold: 5    # 可选: 连续失败次数达到此值时熔断器打开(0=禁用，默认)
 #     # circuit-breaker-recovery-timeout: 60    # 可选: 进入半开状态前的基准秒数(默认 60，重新打开时翻倍)
+#     # same-model-failover: true               # 可选: 该 provider 的 429 同模型故障转移（覆盖全局 http-429-routing）
+#     # 429-routing-policy: immediate_failover   # 可选: 该 provider 的 429 路由策略（覆盖全局 http-429-routing）
 #     api-key-entries:
 #       - api-key: "sk-or-v1-...b780"
 #         proxy-url: "socks5://proxy.example.com:1080" # 可选: 每个密钥的代理覆盖
@@ -273,6 +347,7 @@ nonstream-keepalive-interval: 0
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key 头
 #     prefix: "test"                              # 可选: 需要类似 "test/vertex-pro" 的调用来定位此凭据
+#     priority: 100                               # 可选: 凭据选择优先级，数值越高越优先（默认 0）
 #     base-url: "https://example.com/api"         # 可选，如 https://zenmux.ai/api; 省略时回退到 Google Vertex
 #     proxy-url: "socks5://proxy.example.com:1080" # 可选: 每个密钥的代理覆盖
 #     # proxy-url: "direct" # 可选: 显式直连此凭据

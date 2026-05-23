@@ -82,6 +82,7 @@ cp config.example.yaml config.yaml
 - 该 Mongo 配置同时用于熔断强一致失败状态：`circuit_breaker_failure_states` 和 `circuit_breaker_failure_events`。
 - 错误事件采集写入 `error_events`，属于 Best Effort 观测层；初始化或写入失败不会阻断代理主链路。
 - `openai-compat-network-retry` / `openai-compat-network-retry-backoff-ms` 仅用于 `openai-compatible` executor 在“尚未收到上游响应”时吸收 `EOF`、`TLS handshake timeout` 等瞬时网络抖动。
+- `http-429-routing`（顶层配置）统一了**所有** provider（codex、claude、gemini、vertex、openai-compatibility）的 429 路由策略。支持全局默认值（`same-model-failover: true`，`routing-policy: immediate_failover`）和按 provider 维度的 `overrides`（openai-compat 子 provider 可通过 `provider-key` 精确匹配）。旧的 `openai-compatibility` 条目下的 `same-model-failover` / `429-routing-policy` 仍保留兼容且优先级最高。策略解析顺序：auth 属性 > provider override > 全局默认 > 内建兜底。
 - 当上游已经返回 `200` 但在首个 SSE chunk 前就空流/截断时，代理现在会返回明确的 upstream truncation 错误（`502`），并附带 request-id、chunk 数、累计字节数、最后事件等诊断字段；这类错误不会被伪装成通用成功流。
 - `request-retry` 仍保留为更外层的 auth/credential 级兜底；它不负责已选定同一上游节点的短抖动吸收，两者职责边界分离。
 - `request-budget-seconds` 是单次请求（包含重试与冷却等待）的总预算。预算耗尽时会返回 `upstream_timeout: upstream request budget exceeded`，请求日志会记录 `Error Category: request_budget_exceeded` 与 `Cancel Source: request_budget`。
@@ -93,6 +94,8 @@ cp config.example.yaml config.yaml
 - **本地回退启动**：`go run ./cmd/server`
 - **生产部署**：`./cli-proxy-new -config config-277.yaml`
 - **ssh hk 生产部署**：`/home/ubuntu/cli-proxy-hk/cli-proxy-api.bin -config /home/ubuntu/cli-proxy-hk/config_hk.yaml`
+
+`ssh hk` 发布时，不应直接拿仓库内旧的 `config_hk.yaml` 覆盖线上；应先把 `/home/ubuntu/cli-proxy-hk/config_hk.yaml` 拉回本地，对齐后修改，再上传。
 
 详细配置说明请参考 [用户手册](https://help.router-for.me/cn/)
 
@@ -167,6 +170,7 @@ go test -v -run TestFunctionName ./package/
 - 高级（执行器与翻译器）：[docs/sdk-advanced_CN.md](docs/sdk-advanced_CN.md)
 - 认证：[docs/sdk-access_CN.md](docs/sdk-access_CN.md)
 - 凭据加载/更新：[docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
+- 全局业务泳道图：[docs/technical/global-business-swimlane.md](docs/technical/global-business-swimlane.md)
 - 渠道接入与协议转换专题：[docs/technical/provider-client-routing-and-translation.md](docs/technical/provider-client-routing-and-translation.md)
 - 227 发布手册：[docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md)
 - 发布指导文档：[发布指导文档.md](发布指导文档.md)

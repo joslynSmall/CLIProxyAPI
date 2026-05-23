@@ -97,6 +97,34 @@ func assertModelCooldownError(t *testing.T, err error) {
 	}
 }
 
+func assertModelCircuitOpenError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected model_circuit_open error, got nil")
+	}
+	var circuitErr *modelCircuitOpenError
+	if !errors.As(err, &circuitErr) {
+		t.Fatalf("expected *modelCircuitOpenError, got %T (%v)", err, err)
+	}
+	if status := circuitErr.StatusCode(); status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+}
+
+func assertModelExhaustedError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected model_exhausted error, got nil")
+	}
+	var exhaustedErr *modelExhaustedError
+	if !errors.As(err, &exhaustedErr) {
+		t.Fatalf("expected *modelExhaustedError, got %T (%v)", err, err)
+	}
+	if status := exhaustedErr.StatusCode(); status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+}
+
 func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	t.Parallel()
 
@@ -299,7 +327,7 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	}
 }
 
-func TestSchedulerPick_SingleProviderAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+func TestSchedulerPick_SingleProviderAllCircuitOpenReturnsModelCircuitOpen(t *testing.T) {
 	t.Parallel()
 
 	const model = "single-provider-circuit-open-model"
@@ -322,10 +350,10 @@ func TestSchedulerPick_SingleProviderAllCircuitOpenReturnsModelCooldown(t *testi
 	if got != nil {
 		t.Fatalf("pickSingle() auth = %v, want nil", got)
 	}
-	assertModelCooldownError(t, errPick)
+	assertModelCircuitOpenError(t, errPick)
 }
 
-func TestSchedulerPick_MixedProvidersAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+func TestSchedulerPick_MixedProvidersAllCircuitOpenReturnsModelCircuitOpen(t *testing.T) {
 	t.Parallel()
 
 	const model = "mixed-provider-circuit-open-model"
@@ -352,7 +380,7 @@ func TestSchedulerPick_MixedProvidersAllCircuitOpenReturnsModelCooldown(t *testi
 	if provider != "" {
 		t.Fatalf("pickMixed() provider = %q, want empty", provider)
 	}
-	assertModelCooldownError(t, errPick)
+	assertModelCircuitOpenError(t, errPick)
 }
 
 func TestManager_PickNextMixed_UsesWeightedProviderRotationBeforeCredentialRotation(t *testing.T) {
@@ -486,7 +514,7 @@ func TestManagerCustomSelector_LegacyMixedPathSkipsOpenCircuitAuth(t *testing.T)
 	}
 }
 
-func TestManagerCustomSelector_LegacyPathAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+func TestManagerCustomSelector_LegacyPathAllCircuitOpenReturnsModelCircuitOpen(t *testing.T) {
 	t.Parallel()
 
 	const model = "legacy-all-open-model"
@@ -509,10 +537,10 @@ func TestManagerCustomSelector_LegacyPathAllCircuitOpenReturnsModelCooldown(t *t
 	if got != nil {
 		t.Fatalf("pickNext() auth = %v, want nil", got)
 	}
-	assertModelCooldownError(t, errPick)
+	assertModelCircuitOpenError(t, errPick)
 }
 
-func TestManagerCustomSelector_LegacyMixedPathAllCircuitOpenReturnsModelCooldown(t *testing.T) {
+func TestManagerCustomSelector_LegacyMixedPathAllCircuitOpenReturnsModelCircuitOpen(t *testing.T) {
 	t.Parallel()
 
 	const model = "legacy-mixed-all-open-model"
@@ -540,7 +568,45 @@ func TestManagerCustomSelector_LegacyMixedPathAllCircuitOpenReturnsModelCooldown
 	if provider != "" {
 		t.Fatalf("pickNextMixed() provider = %q, want empty", provider)
 	}
-	assertModelCooldownError(t, errPick)
+	assertModelCircuitOpenError(t, errPick)
+}
+
+func TestSchedulerPick_AllBlockedWithoutCooldownReturnsModelExhausted(t *testing.T) {
+	t.Parallel()
+
+	const model = "all-blocked-no-cooldown-model"
+	registerSchedulerModels(t, "gemini", model, "blocked-a", "blocked-b")
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       "blocked-a",
+			Provider: "gemini",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(5 * time.Minute),
+				},
+			},
+		},
+		&Auth{
+			ID:       "blocked-b",
+			Provider: "gemini",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(6 * time.Minute),
+				},
+			},
+		},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if got != nil {
+		t.Fatalf("pickSingle() auth = %v, want nil", got)
+	}
+	assertModelExhaustedError(t, errPick)
 }
 
 func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {

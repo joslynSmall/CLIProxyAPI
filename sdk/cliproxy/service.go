@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -142,6 +143,70 @@ type Service struct {
 //   - plugin: The usage plugin to register
 func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
+}
+
+func injectHTTP429RoutingAttrsFromConfig(cfg *internalconfig.Config, auth *coreauth.Auth) {
+	if cfg == nil || auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	_, hasSMF := auth.Attributes["same_model_failover"]
+	_, hasPolicy := auth.Attributes["http_429_routing_policy"]
+	if hasSMF && hasPolicy {
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	providerKey := ""
+	if v := strings.TrimSpace(auth.Attributes["provider_key"]); v != "" {
+		providerKey = strings.ToLower(v)
+	}
+	if smf, policy, found := cfg.HTTP429Routing.ResolveOverride(provider, providerKey); found {
+		if !hasSMF {
+			auth.Attributes["same_model_failover"] = strconv.FormatBool(smf)
+		}
+		if !hasPolicy {
+			auth.Attributes["http_429_routing_policy"] = policy
+		}
+		return
+	}
+	if !hasSMF {
+		auth.Attributes["same_model_failover"] = strconv.FormatBool(cfg.HTTP429Routing.SameModelFailoverOrDefault())
+	}
+	if !hasPolicy {
+		auth.Attributes["http_429_routing_policy"] = cfg.HTTP429Routing.RoutingPolicyOrDefault()
+	}
+}
+
+func (s *Service) defaultPostAuthHook() coreauth.PostAuthHook {
+	return func(ctx context.Context, auth *coreauth.Auth) error {
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+		injectHTTP429RoutingAttrsFromConfig(cfg, auth)
+		return nil
+	}
+}
+
+func chainPostAuthHooks(hooks ...coreauth.PostAuthHook) coreauth.PostAuthHook {
+	active := make([]coreauth.PostAuthHook, 0, len(hooks))
+	for _, hook := range hooks {
+		if hook != nil {
+			active = append(active, hook)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, auth *coreauth.Auth) error {
+		for _, hook := range active {
+			if err := hook(ctx, auth); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -709,7 +774,9 @@ func (s *Service) Run(ctx context.Context) error {
 	// legacy clients removed; no caches to refresh
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
-	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
+	serverOptions := append([]api.ServerOption(nil), s.serverOptions...)
+	serverOptions = append(serverOptions, api.WithPostAuthHook(chainPostAuthHooks(s.defaultPostAuthHook())))
+	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
 	if s.server != nil {
 		s.server.SetCircuitBreakerDeletionActionHandler(s)
 	}

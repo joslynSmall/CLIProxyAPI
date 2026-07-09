@@ -318,6 +318,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	translated = carryResponsesReasoningToOpenAIChatToolCalls(from, to, req.Payload, translated)
 	translated = sdktranslator.NormalizeRequestInvariants(from, to, translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
@@ -504,6 +505,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+	translated = carryResponsesReasoningToOpenAIChatToolCalls(from, to, req.Payload, translated)
 	translated = sdktranslator.NormalizeRequestInvariants(from, to, translated)
 
 	// Request usage data in the final streaming chunk so that token statistics

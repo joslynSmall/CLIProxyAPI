@@ -174,3 +174,54 @@ func TestOpenAICompatExecutorExecuteStream_PatchesAssistantToolReasoningWhenThin
 		t.Fatalf("messages.0.reasoning_content should be non-empty, got %q", reasoning.String())
 	}
 }
+
+func TestOpenAICompatExecutorExecute_ChatFallbackCarriesResponsesReasoningToToolCalls(t *testing.T) {
+	const authID = "test-openai-compat-responses-reasoning"
+	globalResponsesCapabilityResolver.Set(authID, ResponsesModeChatFallback)
+	defer globalResponsesCapabilityResolver.Invalidate(authID)
+
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1775540000,"model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: authID,
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test",
+		},
+	}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "glm-5.2",
+		Payload: []byte(`{
+			"model":"glm-5.2",
+			"reasoning":{"effort":"high","summary":"detailed"},
+			"input":[
+				{"type":"reasoning","summary":[{"type":"summary_text","text":"real reasoning summary"}]},
+				{"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}
+			]
+		}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	got := gjson.GetBytes(gotBody, "messages.0.reasoning_content").String()
+	if got != "real reasoning summary" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q; body=%s", got, "real reasoning summary", string(gotBody))
+	}
+}

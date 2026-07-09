@@ -151,6 +151,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
 	body = normalizeCacheControlTTL(body)
+	body = normalizeClaudeMessagesFromOpenAIResponses(body, opts.OriginalRequest)
+	body = normalizeClaudeToolsFromOpenAIResponses(body, opts.OriginalRequest)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -316,6 +318,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	body = normalizeCacheControlTTL(body)
+	body = normalizeClaudeMessagesFromOpenAIResponses(body, opts.OriginalRequest)
+	body = normalizeClaudeToolsFromOpenAIResponses(body, opts.OriginalRequest)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -907,6 +911,124 @@ func checkSystemInstructions(payload []byte) []byte {
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+func normalizeClaudeMessagesFromOpenAIResponses(body []byte, originalRequest []byte) []byte {
+	if len(body) == 0 || len(originalRequest) == 0 || !gjson.ValidBytes(originalRequest) {
+		return body
+	}
+	if gjson.GetBytes(body, "messages.#").Int() > 0 {
+		return body
+	}
+	input := gjson.GetBytes(originalRequest, "input")
+	if !input.Exists() || input.Type != gjson.String {
+		return body
+	}
+	text := input.String()
+	if strings.TrimSpace(text) == "" {
+		return body
+	}
+	msg := []byte(`{"role":"user","content":""}`)
+	msg, _ = sjson.SetBytes(msg, "content", text)
+	body, _ = sjson.SetRawBytes(body, "messages.0", msg)
+	return body
+}
+
+func normalizeClaudeToolsFromOpenAIResponses(body []byte, originalRequest []byte) []byte {
+	if len(body) == 0 || len(originalRequest) == 0 || !gjson.ValidBytes(originalRequest) {
+		return body
+	}
+	tools := gjson.GetBytes(originalRequest, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body
+	}
+
+	normalized := []byte("[]")
+	added := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		switch tool.Get("type").String() {
+		case "namespace":
+			namespace := strings.TrimSpace(tool.Get("name").String())
+			description := tool.Get("description").String()
+			children := tool.Get("tools")
+			if namespace == "" || !children.IsArray() {
+				return true
+			}
+			children.ForEach(func(_, child gjson.Result) bool {
+				if child.Get("type").String() != "function" {
+					return true
+				}
+				name := strings.TrimSpace(child.Get("name").String())
+				if name == "" {
+					return true
+				}
+				claudeTool := []byte(`{"name":"","description":"","input_schema":{}}`)
+				claudeTool, _ = sjson.SetBytes(claudeTool, "name", sanitizeClaudeToolName(namespace+name))
+				if childDesc := child.Get("description").String(); childDesc != "" {
+					claudeTool, _ = sjson.SetBytes(claudeTool, "description", childDesc)
+				} else {
+					claudeTool, _ = sjson.SetBytes(claudeTool, "description", description)
+				}
+				if params := child.Get("parameters"); params.Exists() {
+					claudeTool, _ = sjson.SetRawBytes(claudeTool, "input_schema", []byte(params.Raw))
+				} else if params := child.Get("parametersJsonSchema"); params.Exists() {
+					claudeTool, _ = sjson.SetRawBytes(claudeTool, "input_schema", []byte(params.Raw))
+				}
+				normalized, _ = sjson.SetRawBytes(normalized, "-1", claudeTool)
+				added++
+				return true
+			})
+		case "function", "":
+			name := strings.TrimSpace(tool.Get("name").String())
+			if name == "" {
+				return true
+			}
+			claudeTool := []byte(`{"name":"","description":"","input_schema":{}}`)
+			claudeTool, _ = sjson.SetBytes(claudeTool, "name", sanitizeClaudeToolName(name))
+			if desc := tool.Get("description").String(); desc != "" {
+				claudeTool, _ = sjson.SetBytes(claudeTool, "description", desc)
+			}
+			if params := tool.Get("parameters"); params.Exists() {
+				claudeTool, _ = sjson.SetRawBytes(claudeTool, "input_schema", []byte(params.Raw))
+			} else if params := tool.Get("parametersJsonSchema"); params.Exists() {
+				claudeTool, _ = sjson.SetRawBytes(claudeTool, "input_schema", []byte(params.Raw))
+			}
+			normalized, _ = sjson.SetRawBytes(normalized, "-1", claudeTool)
+			added++
+		}
+		return true
+	})
+
+	if added == 0 {
+		body, _ = sjson.DeleteBytes(body, "tools")
+		return body
+	}
+	body, _ = sjson.SetRawBytes(body, "tools", normalized)
+	return body
+}
+
+func sanitizeClaudeToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return name
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {

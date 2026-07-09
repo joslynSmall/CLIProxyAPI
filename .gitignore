@@ -1,12 +1,18 @@
 # Binaries
+cli-proxy
 cli-proxy-api
-cli-proxy-api.bin
+cli-proxy-api-server
+cli-proxy-api.bin.*
 cli-proxy-new
+cli-proxy-hk
 *.exe
+*.bin.*
 
 # Configuration
 config.yaml
 config-277.yaml
+config_hk.yaml
+config_hk.yaml.bak.*
 state-store.*.ini
 !state-store.example.ini
 .env
@@ -59,6 +65,3 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
-cli-proxy-hk
-config_hk.yaml
-config_hk.yaml.bak.*

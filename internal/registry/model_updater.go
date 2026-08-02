@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,68 @@ var embeddedModelsJSON []byte
 type modelStore struct {
 	mu   sync.RWMutex
 	data *staticModelsJSON
+}
+
+type decodedModelsCatalog struct {
+	catalog         *staticModelsJSON
+	present         map[string]bool
+	sectionErrors   map[string]error
+	unknownSections []string
+}
+
+func decodeModelsCatalog(data []byte) (*decodedModelsCatalog, error) {
+	var rawSections map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSections); err != nil {
+		return nil, fmt.Errorf("decode top-level models catalog: %w", err)
+	}
+	if rawSections == nil {
+		return nil, fmt.Errorf("decode top-level models catalog: expected object")
+	}
+
+	result := &decodedModelsCatalog{
+		catalog:       &staticModelsJSON{},
+		present:       make(map[string]bool),
+		sectionErrors: make(map[string]error),
+	}
+	knownSections := make(map[string]struct{}, 13)
+	sections := []struct {
+		name   string
+		models *[]*ModelInfo
+	}{
+		{name: "claude", models: &result.catalog.Claude},
+		{name: "gemini", models: &result.catalog.Gemini},
+		{name: "vertex", models: &result.catalog.Vertex},
+		{name: "gemini-cli", models: &result.catalog.GeminiCLI},
+		{name: "aistudio", models: &result.catalog.AIStudio},
+		{name: "codex-free", models: &result.catalog.CodexFree},
+		{name: "codex-team", models: &result.catalog.CodexTeam},
+		{name: "codex-plus", models: &result.catalog.CodexPlus},
+		{name: "codex-pro", models: &result.catalog.CodexPro},
+		{name: "qwen", models: &result.catalog.Qwen},
+		{name: "iflow", models: &result.catalog.IFlow},
+		{name: "kimi", models: &result.catalog.Kimi},
+		{name: "antigravity", models: &result.catalog.Antigravity},
+	}
+	for _, section := range sections {
+		knownSections[section.name] = struct{}{}
+		raw, ok := rawSections[section.name]
+		if !ok {
+			continue
+		}
+		result.present[section.name] = true
+		if err := json.Unmarshal(raw, section.models); err != nil {
+			*section.models = nil
+			result.sectionErrors[section.name] = fmt.Errorf("decode %s section: %w", section.name, err)
+		}
+	}
+
+	for name := range rawSections {
+		if _, ok := knownSections[name]; !ok {
+			result.unknownSections = append(result.unknownSections, name)
+		}
+	}
+	sort.Strings(result.unknownSections)
+	return result, nil
 }
 
 var modelsCatalogStore = &modelStore{}

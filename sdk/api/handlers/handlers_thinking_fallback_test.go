@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -103,5 +106,76 @@ func TestExecuteWithAuthManager_FallbacksThinkingEffort(t *testing.T) {
 	}
 	if models[0] != "test-model(xhigh)" || models[1] != "test-model(high)" {
 		t.Fatalf("unexpected attempt models: %v", models)
+	}
+}
+
+func TestExecuteWithAuthManager_ReasoningFallbackDoesNotOpenCodexCircuitBreaker(t *testing.T) {
+	const (
+		authID  = "codex-reasoning-fallback-auth"
+		modelID = "codex-reasoning-fallback-model"
+	)
+
+	var attempts int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		attempts++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"reasoning.effort is not supported for this request"}}`))
+	}))
+	defer upstream.Close()
+
+	executor := runtimeexecutor.NewCodexExecutor(&config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:                         "test-key",
+			BaseURL:                        upstream.URL,
+			CircuitBreakerFailureThreshold: 3,
+		}},
+	})
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": upstream.URL,
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: modelID}})
+	manager.RefreshSchedulerEntry(authID)
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, modelID)
+		reg.UnregisterClient(authID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	_, _, errMsg := handler.ExecuteWithAuthManager(
+		context.Background(),
+		"openai-response",
+		modelID+"(medium)",
+		[]byte(`{"model":"codex-reasoning-fallback-model(medium)","input":"hi","reasoning":{"effort":"medium"}}`),
+		"",
+	)
+	if errMsg == nil {
+		t.Fatal("expected final upstream parameter error")
+	}
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+	}
+	if attempts != 4 {
+		t.Fatalf("upstream attempts = %d, want 4 for medium -> low -> minimal -> none", attempts)
+	}
+	if reg.IsCircuitOpen(authID, modelID) {
+		t.Fatalf("reasoning parameter failures must not open circuit for %q", modelID)
 	}
 }

@@ -218,7 +218,10 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		key = uuid.NewString()
 	}
 
-	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	meta := map[string]any{
+		idempotencyKeyMetadataKey:                            key,
+		coreexecutor.CircuitBreakerFailureDeduperMetadataKey: coreexecutor.NewCircuitBreakerFailureDeduper(),
+	}
 	if apiKey != "" {
 		meta[coreexecutor.IngressAPIKeyMetadataKey] = apiKey
 	}

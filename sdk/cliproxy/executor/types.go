@@ -3,6 +3,8 @@ package executor
 import (
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
@@ -31,7 +33,57 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// CircuitBreakerFailureDeduperMetadataKey stores request-scoped circuit-breaker failure state.
+	CircuitBreakerFailureDeduperMetadataKey = "circuit_breaker_failure_deduper"
 )
+
+// CircuitBreakerFailureDeduper tracks circuit-breaker failures for one logical request.
+type CircuitBreakerFailureDeduper struct {
+	mu       sync.Mutex
+	recorded map[circuitBreakerFailureScope]struct{}
+}
+
+type circuitBreakerFailureScope struct {
+	authID string
+	model  string
+}
+
+// NewCircuitBreakerFailureDeduper creates request-scoped state for circuit-breaker failure recording.
+func NewCircuitBreakerFailureDeduper() *CircuitBreakerFailureDeduper {
+	return &CircuitBreakerFailureDeduper{
+		recorded: make(map[circuitBreakerFailureScope]struct{}),
+	}
+}
+
+// CircuitBreakerFailureDeduperFromMetadata returns request-scoped failure state when present.
+func CircuitBreakerFailureDeduperFromMetadata(metadata map[string]any) *CircuitBreakerFailureDeduper {
+	if metadata == nil {
+		return nil
+	}
+	deduper, _ := metadata[CircuitBreakerFailureDeduperMetadataKey].(*CircuitBreakerFailureDeduper)
+	return deduper
+}
+
+// Mark returns true when a failure has not yet been recorded for this request.
+func (d *CircuitBreakerFailureDeduper) Mark(authID, model string) bool {
+	if d == nil {
+		return true
+	}
+	scope := circuitBreakerFailureScope{
+		authID: strings.TrimSpace(authID),
+		model:  strings.TrimSpace(model),
+	}
+	if scope.authID == "" || scope.model == "" {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, exists := d.recorded[scope]; exists {
+		return false
+	}
+	d.recorded[scope] = struct{}{}
+	return true
+}
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {

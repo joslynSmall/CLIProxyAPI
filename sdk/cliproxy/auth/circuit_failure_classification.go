@@ -91,6 +91,9 @@ func IsRequestInvalidByStatus(statusCode int, message string) (invalid bool, rea
 	}
 	switch statusCode {
 	case http.StatusBadRequest:
+		if IsReasoningParameterErrorMessage(message) {
+			return true, "reasoning_parameter"
+		}
 		if strings.Contains(strings.ToLower(strings.TrimSpace(message)), "invalid_request_error") {
 			return true, "invalid_request"
 		}
@@ -105,6 +108,26 @@ func IsRequestInvalidByStatus(statusCode int, message string) (invalid bool, rea
 	default:
 		return false, ""
 	}
+}
+
+// IsReasoningParameterErrorMessage reports whether a message describes an invalid
+// reasoning or thinking parameter rather than an unavailable upstream credential.
+func IsReasoningParameterErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return false
+	}
+	hasReasoningParameter := strings.Contains(lower, "reasoning_effort") ||
+		strings.Contains(lower, "reasoning.effort") ||
+		(strings.Contains(lower, "reasoning") && strings.Contains(lower, "effort")) ||
+		strings.Contains(lower, "thinking")
+	if !hasReasoningParameter {
+		return false
+	}
+	return strings.Contains(lower, "not supported") ||
+		strings.Contains(lower, "unsupported") ||
+		strings.Contains(lower, "out of range") ||
+		strings.Contains(lower, "invalid")
 }
 
 // IsCircuitCountableFailure reports whether one failure is eligible for circuit-breaker counting.

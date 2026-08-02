@@ -154,3 +154,75 @@ func TestCodexExecutorCircuitBreakerUsesRequestedModel(t *testing.T) {
 		t.Fatalf("did not expect circuit to open for upstream model %q", upstreamModel)
 	}
 }
+
+func TestCodexExecutorCircuitBreakerDeduplicatesCountableFailuresPerRequest(t *testing.T) {
+	const (
+		authID  = "cb-codex-deduper-auth"
+		modelID = "cb-codex-deduper-model"
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":{"message":"temporary upstream failure","type":"server_error"}}`))
+	}))
+	defer upstream.Close()
+
+	executor := NewCodexExecutor(&config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:                         "test-key",
+			BaseURL:                        upstream.URL,
+			CircuitBreakerFailureThreshold: 3,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url": upstream.URL,
+			"api_key":  "test-key",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, modelID)
+		reg.UnregisterClient(authID)
+	})
+
+	req := cliproxyexecutor.Request{
+		Model:   modelID,
+		Payload: []byte(fmt.Sprintf(`{"model":"%s","input":"hi"}`, modelID)),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey:               modelID,
+			cliproxyexecutor.CircuitBreakerFailureDeduperMetadataKey: cliproxyexecutor.NewCircuitBreakerFailureDeduper(),
+		},
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := executor.Execute(context.Background(), auth, req, opts); err == nil {
+			t.Fatalf("same request attempt %d: expected upstream error", i+1)
+		}
+	}
+	if reg.IsCircuitOpen(authID, modelID) {
+		t.Fatalf("retries within one logical request must not open circuit for %q", modelID)
+	}
+
+	reg.ResetCircuitBreaker(authID, modelID)
+	for i := 0; i < 3; i++ {
+		opts.Metadata = map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey:               modelID,
+			cliproxyexecutor.CircuitBreakerFailureDeduperMetadataKey: cliproxyexecutor.NewCircuitBreakerFailureDeduper(),
+		}
+		if _, err := executor.Execute(context.Background(), auth, req, opts); err == nil {
+			t.Fatalf("independent request %d: expected upstream error", i+1)
+		}
+	}
+	if !reg.IsCircuitOpen(authID, modelID) {
+		t.Fatalf("three independent requests must open circuit for %q", modelID)
+	}
+}

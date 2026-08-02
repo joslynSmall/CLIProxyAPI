@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,6 +86,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	circuitModel := circuitBreakerModelID(opts, req.Model)
+	circuitFailureDeduper := cliproxyexecutor.CircuitBreakerFailureDeduperFromMetadata(opts.Metadata)
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -148,7 +150,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return resp, err
 	}
 	defer func() {
@@ -162,13 +164,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newCodexStatusErr(httpResp.StatusCode, b)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
@@ -217,13 +219,14 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, nil
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
-	e.recordCodexFailure(auth, circuitModel)
+	e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 	return resp, err
 }
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	circuitModel := circuitBreakerModelID(opts, req.Model)
+	circuitFailureDeduper := cliproxyexecutor.CircuitBreakerFailureDeduperFromMetadata(opts.Metadata)
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -280,7 +283,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return resp, err
 	}
 	defer func() {
@@ -294,13 +297,13 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = newCodexStatusErr(httpResp.StatusCode, b)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
@@ -319,6 +322,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	circuitModel := circuitBreakerModelID(opts, req.Model)
+	circuitFailureDeduper := cliproxyexecutor.CircuitBreakerFailureDeduperFromMetadata(opts.Metadata)
 
 	apiKey, baseURL := codexCreds(auth)
 	if baseURL == "" {
@@ -382,7 +386,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -393,12 +397,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		if readErr != nil {
 			recordAPIResponseError(ctx, e.cfg, readErr)
+			e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, readErr)
 			return nil, readErr
 		}
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErr(httpResp.StatusCode, data)
-		e.recordCodexFailure(auth, circuitModel)
+		e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, err)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -443,7 +448,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return
 			}
 			recordAPIResponseError(ctx, e.cfg, errRead)
-			e.recordCodexFailure(auth, circuitModel)
+			e.recordCodexFailure(auth, circuitModel, circuitFailureDeduper, errRead)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errRead}
 			return
@@ -945,8 +950,17 @@ func (e *CodexExecutor) codexCircuitBreakerSettings(auth *cliproxyauth.Auth) (in
 	return threshold, timeoutSec
 }
 
-func (e *CodexExecutor) recordCodexFailure(auth *cliproxyauth.Auth, model string) {
-	if auth == nil || auth.ID == "" || strings.TrimSpace(model) == "" {
+func (e *CodexExecutor) recordCodexFailure(auth *cliproxyauth.Auth, model string, deduper *cliproxyexecutor.CircuitBreakerFailureDeduper, failure error) {
+	if auth == nil || auth.ID == "" || strings.TrimSpace(model) == "" || failure == nil {
+		return
+	}
+	statusCode := 0
+	var statusError statusCoder
+	if errors.As(failure, &statusError) && statusError != nil {
+		statusCode = statusError.StatusCode()
+	}
+	countable, _ := cliproxyauth.IsCircuitCountableFailure(statusCode, failure.Error())
+	if !countable || !deduper.Mark(auth.ID, model) {
 		return
 	}
 	threshold, timeoutSec := e.codexCircuitBreakerSettings(auth)

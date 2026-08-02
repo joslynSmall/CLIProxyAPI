@@ -177,6 +177,60 @@ func TestCodexWebsocketsExecutorCircuitBreakerUsesRequestedModel(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketsExecutorReasoningParameterHandshakeDoesNotOpenCircuitBreaker(t *testing.T) {
+	const (
+		authID  = "cb-codex-ws-reasoning-auth"
+		modelID = "cb-codex-ws-reasoning-model"
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"reasoning.effort is not supported"}}`))
+	}))
+	defer upstream.Close()
+
+	executor := NewCodexWebsocketsExecutor(&config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:                         "test-key",
+			BaseURL:                        upstream.URL,
+			CircuitBreakerFailureThreshold: 1,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"base_url":   upstream.URL,
+			"api_key":    "test-key",
+			"websockets": "true",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		reg.ResetCircuitBreaker(authID, modelID)
+		reg.UnregisterClient(authID)
+	})
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   modelID,
+		Payload: []byte(`{"model":"cb-codex-ws-reasoning-model","input":"hi","reasoning":{"effort":"medium"}}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: modelID,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected upstream parameter error")
+	}
+	if reg.IsCircuitOpen(authID, modelID) {
+		t.Fatalf("reasoning parameter failure must not open circuit for %q", modelID)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersPrefersExistingHeadersOverClientAndConfig(t *testing.T) {
 	cfg := &config.Config{
 		CodexHeaderDefaults: config.CodexHeaderDefaults{

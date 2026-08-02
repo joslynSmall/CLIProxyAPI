@@ -32,6 +32,16 @@ func TestIsCircuitCountableFailure_ModelUnsupportedStillCountable(t *testing.T) 
 	}
 }
 
+func TestIsCircuitCountableFailure_ReasoningParameterErrorSkipped(t *testing.T) {
+	countable, reason := IsCircuitCountableFailure(400, `{"error":{"message":"reasoning.effort is not supported for this request"}}`)
+	if countable {
+		t.Fatal("countable = true, want false")
+	}
+	if reason != "reasoning_parameter" {
+		t.Fatalf("skip reason = %q, want reasoning_parameter", reason)
+	}
+}
+
 func TestSanitizeErrorMessageForStore_MasksSecretsAndTruncates(t *testing.T) {
 	raw := "authorization: bearer super-secret-token token=abcd1234 " + strings.Repeat("x", 1200)
 	masked, hash := SanitizeErrorMessageForStore(raw, 64)

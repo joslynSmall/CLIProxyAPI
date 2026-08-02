@@ -114,6 +114,31 @@ func TestErrorEventPluginHandleUsageSkipsSuccessfulRecord(t *testing.T) {
 	}
 }
 
+func TestErrorEventPluginHandleUsageMarksReasoningParameterFailureAsNotCountable(t *testing.T) {
+	store := &fakeErrorEventStore{}
+	mongostate.SetGlobalErrorEventStore(store)
+	t.Cleanup(func() { mongostate.SetGlobalErrorEventStore(nil) })
+
+	NewErrorEventPlugin().HandleUsage(context.Background(), coreusage.Record{
+		Provider:     "codex",
+		Model:        "gpt-5.6-terra",
+		AuthID:       "auth-1",
+		Failed:       true,
+		StatusCode:   400,
+		ErrorMessage: `{"error":{"message":"reasoning.effort is not supported"}}`,
+	})
+
+	if len(store.inserted) != 1 {
+		t.Fatalf("insert count = %d, want 1", len(store.inserted))
+	}
+	if store.inserted[0].CircuitCountable {
+		t.Fatal("circuit_countable = true, want false")
+	}
+	if store.inserted[0].CircuitSkipReason != "reasoning_parameter" {
+		t.Fatalf("circuit_skip_reason = %q, want reasoning_parameter", store.inserted[0].CircuitSkipReason)
+	}
+}
+
 func TestErrorEventPluginHandleUsageBestEffortOnStoreFailure(t *testing.T) {
 	store := &fakeErrorEventStore{insertErr: errors.New("write failed")}
 	mongostate.SetGlobalErrorEventStore(store)

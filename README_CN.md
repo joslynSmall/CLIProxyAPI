@@ -171,6 +171,7 @@ go test -v -run TestFunctionName ./package/
 - 认证：[docs/sdk-access_CN.md](docs/sdk-access_CN.md)
 - 凭据加载/更新：[docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
 - 全局业务泳道图：[docs/technical/global-business-swimlane.md](docs/technical/global-business-swimlane.md)
+- 模型目录 Section 状态协议：[docs/technical/model-catalog-protocol.md](docs/technical/model-catalog-protocol.md)
 - 渠道接入与协议转换专题：[docs/technical/provider-client-routing-and-translation.md](docs/technical/provider-client-routing-and-translation.md)
 - 227 发布手册：[docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md)
 - 发布指导文档：[发布指导文档.md](发布指导文档.md)

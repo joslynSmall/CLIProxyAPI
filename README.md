@@ -152,6 +152,7 @@ go test -v -run TestFunctionName ./package/
 ## Technical Docs
 
 - Global business swimlane: [docs/technical/global-business-swimlane.md](docs/technical/global-business-swimlane.md)
+- Model catalog section-state protocol: [docs/technical/model-catalog-protocol.md](docs/technical/model-catalog-protocol.md)
 
 ## Contributing
 

@@ -5,6 +5,9 @@ package cliproxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -20,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store/mongostate"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -131,6 +135,9 @@ type Service struct {
 	// geminiCLIModelDiscoverer resolves live Gemini CLI models for one auth/project.
 	geminiCLIModelDiscoverer func(context.Context, *coreauth.Auth) (*executor.GeminiCLIDiscoveryResult, error)
 
+	// codexAuthActivationMu serializes post-save activation for credentials sharing a file ID.
+	codexAuthActivationMu sync.Mutex
+
 	providerRateLimitPersistMu    sync.Mutex
 	providerRateLimitPersistTimer *time.Timer
 	providerRateLimitPersistDirty bool
@@ -207,6 +214,59 @@ func chainPostAuthHooks(hooks ...coreauth.PostAuthHook) coreauth.PostAuthHook {
 		}
 		return nil
 	}
+}
+
+func (s *Service) activatePersistedCodexAuth(ctx context.Context, record *coreauth.Auth, savedPath string) error {
+	if s == nil || record == nil || !strings.EqualFold(strings.TrimSpace(record.Provider), "codex") {
+		return nil
+	}
+
+	s.codexAuthActivationMu.Lock()
+	defer s.codexAuthActivationMu.Unlock()
+
+	var (
+		auths []*coreauth.Auth
+		err   error
+	)
+	if s != nil && s.watcher != nil {
+		auths, err = s.watcher.SyncAuthFile(savedPath)
+	}
+	if err != nil || len(auths) == 0 {
+		auths, err = s.synthesizePersistedAuthFile(savedPath)
+		if err != nil {
+			return err
+		}
+	}
+	for _, auth := range auths {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		s.applyCoreAuthAddOrUpdate(coreauth.WithSkipPersist(ctx), auth)
+		return nil
+	}
+	return fmt.Errorf("persisted file did not produce a codex auth")
+}
+
+func (s *Service) synthesizePersistedAuthFile(savedPath string) ([]*coreauth.Auth, error) {
+	if strings.TrimSpace(savedPath) == "" {
+		return nil, fmt.Errorf("auth path is empty")
+	}
+	data, err := os.ReadFile(savedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read persisted auth: %w", err)
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil {
+		return nil, fmt.Errorf("service configuration is unavailable")
+	}
+	return synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+		Config:      cfg,
+		AuthDir:     cfg.AuthDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}, savedPath, data), nil
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -351,6 +411,10 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 		if update.Auth == nil || update.Auth.ID == "" {
 			return
 		}
+		if s.staleCodexFileAuthUpdate(update.Auth) {
+			log.Debugf("ignoring stale file update for codex auth %s", update.Auth.ID)
+			return
+		}
 		s.applyCoreAuthAddOrUpdate(ctx, update.Auth)
 	case watcher.AuthUpdateActionDelete:
 		id := update.ID
@@ -360,10 +424,56 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 		if id == "" {
 			return
 		}
+		if s.persistedCodexAuthStillExists(id) {
+			log.Debugf("ignoring stale delete for persisted codex auth %s", id)
+			return
+		}
 		s.applyCoreAuthRemoval(ctx, id)
 	default:
 		log.Debugf("received unknown auth update action: %v", update.Action)
 	}
+}
+
+func (s *Service) staleCodexFileAuthUpdate(auth *coreauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	expectedHash := strings.TrimSpace(auth.Attributes["auth_file_hash"])
+	path := strings.TrimSpace(auth.Attributes["path"])
+	if expectedHash == "" || path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	actualHash := sha256.Sum256(data)
+	return !strings.EqualFold(expectedHash, hex.EncodeToString(actualHash[:]))
+}
+
+func (s *Service) persistedCodexAuthStillExists(id string) bool {
+	if s == nil || s.coreManager == nil || id == "" {
+		return false
+	}
+	auth, ok := s.coreManager.GetByID(id)
+	if !ok || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	path := strings.TrimSpace(auth.Attributes["path"])
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var persisted struct {
+		Type string `json:"type"`
+	}
+	if err = json.Unmarshal(data, &persisted); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(persisted.Type), "codex")
 }
 
 func (s *Service) ensureWebsocketGateway() {
@@ -778,6 +888,7 @@ func (s *Service) Run(ctx context.Context) error {
 	serverOptions = append(serverOptions, api.WithPostAuthHook(chainPostAuthHooks(s.defaultPostAuthHook())))
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, serverOptions...)
 	if s.server != nil {
+		s.server.SetAuthSavedHook(s.activatePersistedCodexAuth)
 		s.server.SetCircuitBreakerDeletionActionHandler(s)
 	}
 

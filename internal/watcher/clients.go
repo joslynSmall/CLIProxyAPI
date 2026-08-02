@@ -141,60 +141,82 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
+	if _, err := w.processAuthFile(path, true); err != nil {
+		log.Errorf("failed to process auth file %s: %v", filepath.Base(path), err)
+	}
+}
+
+// SyncAuthFile updates watcher state without re-persisting a file already saved by the token store.
+func (w *Watcher) SyncAuthFile(path string) ([]*coreauth.Auth, error) {
+	return w.processAuthFile(path, false)
+}
+
+func (w *Watcher) processAuthFile(path string, persist bool) ([]*coreauth.Auth, error) {
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
-		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
-		return
+		return nil, fmt.Errorf("read auth file: %w", errRead)
 	}
 	if len(data) == 0 {
-		log.Debugf("ignoring empty auth file: %s", filepath.Base(path))
-		return
+		return nil, fmt.Errorf("auth file is empty")
 	}
 
 	sum := sha256.Sum256(data)
 	curHash := hex.EncodeToString(sum[:])
 	normalized := w.normalizeAuthPath(path)
 
-	// Parse new auth content for diff comparison
+	// Parse new auth content for diff comparison.
 	var newAuth coreauth.Auth
 	if errParse := json.Unmarshal(data, &newAuth); errParse != nil {
-		log.Errorf("failed to parse auth file %s: %v", filepath.Base(path), errParse)
-		return
+		return nil, fmt.Errorf("parse auth file: %w", errParse)
 	}
 
 	w.clientsMutex.Lock()
 	if w.config == nil {
-		log.Error("config is nil, cannot add or update client")
 		w.clientsMutex.Unlock()
-		return
+		return nil, fmt.Errorf("watcher config is unavailable")
 	}
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 	}
+
+	sctx := &synthesizer.SynthesisContext{
+		Config:      w.config,
+		AuthDir:     w.authDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	for _, auth := range generated {
+		if auth == nil {
+			continue
+		}
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes["auth_file_hash"] = curHash
+	}
 	if prev, ok := w.lastAuthHashes[normalized]; ok && prev == curHash {
 		log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(path))
 		w.clientsMutex.Unlock()
-		return
+		return generated, nil
 	}
 
-	// Get old auth for diff comparison
+	// Get old auth for diff comparison.
 	cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 	var oldAuth *coreauth.Auth
 	if cacheAuthContents && w.lastAuthContents != nil {
 		oldAuth = w.lastAuthContents[normalized]
 	}
 
-	// Compute and log field changes
 	if cacheAuthContents {
 		if changes := diff.BuildAuthChangeDetails(oldAuth, &newAuth); len(changes) > 0 {
 			log.Debugf("auth field changes for %s:", filepath.Base(path))
-			for _, c := range changes {
-				log.Debugf("  %s", c)
+			for _, change := range changes {
+				log.Debugf("  %s", change)
 			}
 		}
 	}
 
-	// Update caches
 	w.lastAuthHashes[normalized] = curHash
 	if cacheAuthContents {
 		if w.lastAuthContents == nil {
@@ -204,18 +226,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
+	for id, auth := range w.fileAuthsByPath[normalized] {
+		oldByID[id] = auth
 	}
 
-	// Build synthesized auth entries for this single file only.
-	sctx := &synthesizer.SynthesisContext{
-		Config:      w.config,
-		AuthDir:     w.authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
-	}
-	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
@@ -225,8 +239,11 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
 	w.clientsMutex.Unlock()
 
-	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
+	if persist {
+		w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
+	}
 	w.dispatchAuthUpdates(updates)
+	return generated, nil
 }
 
 func (w *Watcher) removeClient(path string) {

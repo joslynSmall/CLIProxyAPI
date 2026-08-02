@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -87,6 +88,7 @@ type WatcherWrapper struct {
 
 	setConfig             func(cfg *config.Config)
 	snapshotAuths         func() []*coreauth.Auth
+	syncAuthFile          func(path string) ([]*coreauth.Auth, error)
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 }
@@ -137,6 +139,14 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// SyncAuthFile updates watcher state for a persisted auth file and returns its normalized auths.
+func (w *WatcherWrapper) SyncAuthFile(path string) ([]*coreauth.Auth, error) {
+	if w == nil || w.syncAuthFile == nil {
+		return nil, fmt.Errorf("auth file synchronization is unavailable")
+	}
+	return w.syncAuthFile(path)
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.

@@ -322,6 +322,14 @@ func (s *Server) SetCircuitBreakerDeletionActionHandler(handler managementHandle
 	s.mgmt.SetCircuitBreakerDeletionActionHandler(handler)
 }
 
+// SetAuthSavedHook registers the callback used to activate persisted OAuth auths.
+func (s *Server) SetAuthSavedHook(hook managementHandlers.AuthSavedHook) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetAuthSavedHook(hook)
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {

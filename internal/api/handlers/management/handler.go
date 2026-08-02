@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -27,6 +28,9 @@ type attemptInfo struct {
 	lastActivity time.Time // track last activity for cleanup
 }
 
+// AuthSavedHook runs after an auth record has been persisted successfully.
+type AuthSavedHook func(context.Context, *coreauth.Auth, string) error
+
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
 
@@ -49,6 +53,7 @@ type Handler struct {
 	envSecret                           string
 	logDir                              string
 	postAuthHook                        coreauth.PostAuthHook
+	authSavedHook                       AuthSavedHook
 	circuitBreakerDeletionActionHandler CircuitBreakerDeletionActionHandler
 }
 
@@ -138,6 +143,11 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// SetAuthSavedHook registers a hook to activate an auth after persistence.
+func (h *Handler) SetAuthSavedHook(hook AuthSavedHook) {
+	h.authSavedHook = hook
 }
 
 // SetCircuitBreakerDeletionActionHandler injects the executor used by delete/dismiss APIs.

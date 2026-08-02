@@ -1289,7 +1289,16 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	return store.Save(ctx, record)
+	savedPath, err := store.Save(ctx, record)
+	if err != nil {
+		return savedPath, err
+	}
+	if h.authSavedHook != nil {
+		if err = h.authSavedHook(ctx, record, savedPath); err != nil {
+			return savedPath, fmt.Errorf("post-save auth activation failed: %w", err)
+		}
+	}
+	return savedPath, nil
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
@@ -1815,10 +1824,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "codex",
-			FileName: fileName,
-			Storage:  tokenStorage,
+			ID:         fileName,
+			Provider:   "codex",
+			FileName:   fileName,
+			Storage:    tokenStorage,
+			Attributes: map[string]string{"plan_type": planType},
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
@@ -1826,8 +1836,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
+			if savedPath != "" {
+				SetOAuthSessionError(state, "Authentication saved but activation failed")
+				log.Errorf("Authentication saved but activation failed: %v", errSave)
+			} else {
+				SetOAuthSessionError(state, "Failed to save authentication tokens")
+				log.Errorf("Failed to save authentication tokens: %v", errSave)
+			}
 			return
 		}
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)

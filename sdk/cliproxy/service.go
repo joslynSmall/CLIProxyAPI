@@ -926,37 +926,7 @@ func (s *Service) Run(ctx context.Context) error {
 	// This intentionally rebuilds per-auth model availability from the latest catalog
 	// snapshot instead of preserving prior registry suppression state.
 	registry.SetModelRefreshCallback(func(changedProviders []string) {
-		if s == nil || s.coreManager == nil || len(changedProviders) == 0 {
-			return
-		}
-
-		providerSet := make(map[string]bool, len(changedProviders))
-		for _, p := range changedProviders {
-			providerSet[strings.ToLower(strings.TrimSpace(p))] = true
-		}
-
-		auths := s.coreManager.List()
-		refreshed := 0
-		for _, item := range auths {
-			if item == nil || item.ID == "" {
-				continue
-			}
-			auth, ok := s.coreManager.GetByID(item.ID)
-			if !ok || auth == nil || auth.Disabled {
-				continue
-			}
-			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-			if !providerSet[provider] {
-				continue
-			}
-			if s.refreshModelRegistrationForAuth(auth) {
-				refreshed++
-			}
-		}
-
-		if refreshed > 0 {
-			log.Infof("re-registered models for %d auth(s) due to model catalog changes: %v", refreshed, changedProviders)
-		}
+		s.refreshModelRegistrations(changedProviders)
 	})
 
 	var watcherWrapper *WatcherWrapper
@@ -1072,6 +1042,39 @@ func (s *Service) Run(ctx context.Context) error {
 	case err = <-s.serverErr:
 		return err
 	}
+}
+
+func (s *Service) refreshModelRegistrations(changedProviders []string) int {
+	if s == nil || s.coreManager == nil || len(changedProviders) == 0 {
+		return 0
+	}
+
+	providerSet := make(map[string]bool, len(changedProviders))
+	for _, provider := range changedProviders {
+		providerSet[strings.ToLower(strings.TrimSpace(provider))] = true
+	}
+
+	refreshed := 0
+	for _, item := range s.coreManager.List() {
+		if item == nil || item.ID == "" {
+			continue
+		}
+		auth, ok := s.coreManager.GetByID(item.ID)
+		if !ok || auth == nil || auth.Disabled {
+			continue
+		}
+		if !providerSet[strings.ToLower(strings.TrimSpace(auth.Provider))] {
+			continue
+		}
+		if s.refreshModelRegistrationForAuth(auth) {
+			refreshed++
+		}
+	}
+
+	if refreshed > 0 {
+		log.Infof("re-registered models for %d auth(s) due to model catalog changes: %v", refreshed, changedProviders)
+	}
+	return refreshed
 }
 
 // Shutdown gracefully stops background workers and the HTTP server.

@@ -70,8 +70,9 @@ go vet ./...
 # 静态分析 / 导入整理
 go run golang.org/x/tools/cmd/goimports@latest -w .
 
-# 刷新模型目录（CI 工作流）
-git fetch --depth 1 https://github.com/router-for-me/models.git main
+# 刷新模型目录（CI 工作流固定到 fork 的不可变提交）
+models_ref="$(cat internal/registry/models/REF)"
+git fetch --depth 1 https://github.com/joslynSmall/models.git "$models_ref"
 git show FETCH_HEAD:models.json > internal/registry/models/models.json
 ```
 

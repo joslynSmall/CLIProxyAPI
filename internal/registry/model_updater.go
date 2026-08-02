@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -21,8 +22,7 @@ const (
 )
 
 var modelsURLs = []string{
-	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
-	"https://models.router-for.me/models.json",
+	"https://raw.githubusercontent.com/joslynSmall/models/refs/heads/main/models.json",
 }
 
 //go:embed models/models.json
@@ -40,6 +40,36 @@ type decodedModelsCatalog struct {
 	unknownSections []string
 }
 
+type modelCatalogMergeReport struct {
+	appliedSections  []string
+	preservedMissing []string
+	invalidSections  map[string]error
+	unknownSections  []string
+}
+
+type modelCatalogSection struct {
+	name     string
+	provider string
+	get      func(*staticModelsJSON) []*ModelInfo
+	set      func(*staticModelsJSON, []*ModelInfo)
+}
+
+var modelCatalogSections = []modelCatalogSection{
+	{name: "claude", provider: "claude", get: func(c *staticModelsJSON) []*ModelInfo { return c.Claude }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.Claude = m }},
+	{name: "gemini", provider: "gemini", get: func(c *staticModelsJSON) []*ModelInfo { return c.Gemini }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.Gemini = m }},
+	{name: "vertex", provider: "vertex", get: func(c *staticModelsJSON) []*ModelInfo { return c.Vertex }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.Vertex = m }},
+	{name: "gemini-cli", provider: "gemini-cli", get: func(c *staticModelsJSON) []*ModelInfo { return c.GeminiCLI }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.GeminiCLI = m }},
+	{name: "aistudio", provider: "aistudio", get: func(c *staticModelsJSON) []*ModelInfo { return c.AIStudio }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.AIStudio = m }},
+	{name: "codex-free", provider: "codex", get: func(c *staticModelsJSON) []*ModelInfo { return c.CodexFree }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.CodexFree = m }},
+	{name: "codex-team", provider: "codex", get: func(c *staticModelsJSON) []*ModelInfo { return c.CodexTeam }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.CodexTeam = m }},
+	{name: "codex-plus", provider: "codex", get: func(c *staticModelsJSON) []*ModelInfo { return c.CodexPlus }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.CodexPlus = m }},
+	{name: "codex-pro", provider: "codex", get: func(c *staticModelsJSON) []*ModelInfo { return c.CodexPro }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.CodexPro = m }},
+	{name: "qwen", provider: "qwen", get: func(c *staticModelsJSON) []*ModelInfo { return c.Qwen }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.Qwen = m }},
+	{name: "iflow", provider: "iflow", get: func(c *staticModelsJSON) []*ModelInfo { return c.IFlow }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.IFlow = m }},
+	{name: "kimi", provider: "kimi", get: func(c *staticModelsJSON) []*ModelInfo { return c.Kimi }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.Kimi = m }},
+	{name: "antigravity", provider: "antigravity", get: func(c *staticModelsJSON) []*ModelInfo { return c.Antigravity }, set: func(c *staticModelsJSON, m []*ModelInfo) { c.Antigravity = m }},
+}
+
 func decodeModelsCatalog(data []byte) (*decodedModelsCatalog, error) {
 	var rawSections map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawSections); err != nil {
@@ -54,36 +84,25 @@ func decodeModelsCatalog(data []byte) (*decodedModelsCatalog, error) {
 		present:       make(map[string]bool),
 		sectionErrors: make(map[string]error),
 	}
-	knownSections := make(map[string]struct{}, 13)
-	sections := []struct {
-		name   string
-		models *[]*ModelInfo
-	}{
-		{name: "claude", models: &result.catalog.Claude},
-		{name: "gemini", models: &result.catalog.Gemini},
-		{name: "vertex", models: &result.catalog.Vertex},
-		{name: "gemini-cli", models: &result.catalog.GeminiCLI},
-		{name: "aistudio", models: &result.catalog.AIStudio},
-		{name: "codex-free", models: &result.catalog.CodexFree},
-		{name: "codex-team", models: &result.catalog.CodexTeam},
-		{name: "codex-plus", models: &result.catalog.CodexPlus},
-		{name: "codex-pro", models: &result.catalog.CodexPro},
-		{name: "qwen", models: &result.catalog.Qwen},
-		{name: "iflow", models: &result.catalog.IFlow},
-		{name: "kimi", models: &result.catalog.Kimi},
-		{name: "antigravity", models: &result.catalog.Antigravity},
-	}
-	for _, section := range sections {
+	knownSections := make(map[string]struct{}, len(modelCatalogSections))
+	for _, section := range modelCatalogSections {
 		knownSections[section.name] = struct{}{}
 		raw, ok := rawSections[section.name]
 		if !ok {
 			continue
 		}
 		result.present[section.name] = true
-		if err := json.Unmarshal(raw, section.models); err != nil {
-			*section.models = nil
-			result.sectionErrors[section.name] = fmt.Errorf("decode %s section: %w", section.name, err)
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			result.sectionErrors[section.name] = fmt.Errorf("decode %s section: expected array", section.name)
+			continue
 		}
+		var models []*ModelInfo
+		if err := json.Unmarshal(raw, &models); err != nil {
+			result.sectionErrors[section.name] = fmt.Errorf("decode %s section: %w", section.name, err)
+			continue
+		}
+		section.set(result.catalog, models)
 	}
 
 	for name := range rawSections {
@@ -93,6 +112,64 @@ func decodeModelsCatalog(data []byte) (*decodedModelsCatalog, error) {
 	}
 	sort.Strings(result.unknownSections)
 	return result, nil
+}
+
+func mergeDecodedModelsCatalog(current *staticModelsJSON, decoded *decodedModelsCatalog) (*staticModelsJSON, *modelCatalogMergeReport, error) {
+	if current == nil {
+		return nil, nil, fmt.Errorf("current models catalog is nil")
+	}
+	if decoded == nil || decoded.catalog == nil {
+		return nil, nil, fmt.Errorf("decoded models catalog is nil")
+	}
+
+	merged := &staticModelsJSON{}
+	report := &modelCatalogMergeReport{
+		invalidSections: make(map[string]error),
+		unknownSections: append([]string(nil), decoded.unknownSections...),
+	}
+	for _, section := range modelCatalogSections {
+		currentModels := cloneModelInfos(section.get(current))
+		if !decoded.present[section.name] {
+			section.set(merged, currentModels)
+			report.preservedMissing = append(report.preservedMissing, section.name)
+			continue
+		}
+		if err := decoded.sectionErrors[section.name]; err != nil {
+			section.set(merged, currentModels)
+			report.invalidSections[section.name] = err
+			continue
+		}
+		remoteModels := section.get(decoded.catalog)
+		if err := validateModelSection(section.name, remoteModels); err != nil {
+			section.set(merged, currentModels)
+			report.invalidSections[section.name] = err
+			continue
+		}
+		section.set(merged, cloneModelInfos(remoteModels))
+		report.appliedSections = append(report.appliedSections, section.name)
+	}
+	if len(report.appliedSections) == 0 {
+		return nil, report, fmt.Errorf("catalog contains no applicable supported sections")
+	}
+	if err := validateModelsCatalog(merged); err != nil {
+		return nil, report, fmt.Errorf("validate merged models catalog: %w", err)
+	}
+	return merged, report, nil
+}
+
+func validateCompleteDecodedCatalog(decoded *decodedModelsCatalog) error {
+	if decoded == nil || decoded.catalog == nil {
+		return fmt.Errorf("catalog is nil")
+	}
+	for _, section := range modelCatalogSections {
+		if !decoded.present[section.name] {
+			return fmt.Errorf("%s section is missing", section.name)
+		}
+		if err := decoded.sectionErrors[section.name]; err != nil {
+			return err
+		}
+	}
+	return validateModelsCatalog(decoded.catalog)
 }
 
 var modelsCatalogStore = &modelStore{}
@@ -178,7 +255,7 @@ func tryStartupRefresh(ctx context.Context) {
 func tryRefreshModels(ctx context.Context, label string) {
 	oldData := getModels()
 
-	parsed, url := fetchModelsFromRemote(ctx)
+	parsed, url, report := fetchModelsFromRemote(ctx, oldData)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		return
@@ -192,6 +269,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
 
+	if len(report.preservedMissing) > 0 {
+		log.Infof("%s preserved missing model sections from current catalog: %v", label, report.preservedMissing)
+	}
+	if len(report.unknownSections) > 0 {
+		log.Debugf("%s ignored unknown model sections: %v", label, report.unknownSections)
+	}
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
 		return
@@ -201,9 +284,9 @@ func tryRefreshModels(ctx context.Context, label string) {
 	notifyModelRefresh(changed)
 }
 
-// fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
-// along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
-func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
+// fetchModelsFromRemote tries all remote URLs and merges each response section-by-section
+// with current. It returns nil when no URL produces an applicable catalog.
+func fetchModelsFromRemote(ctx context.Context, current *staticModelsJSON) (*staticModelsJSON, string, *modelCatalogMergeReport) {
 	client := &http.Client{Timeout: modelsFetchTimeout}
 	for _, url := range modelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
@@ -237,19 +320,28 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			continue
 		}
 
-		var parsed staticModelsJSON
-		if err := json.Unmarshal(data, &parsed); err != nil {
+		decoded, err := decodeModelsCatalog(data)
+		if err != nil {
 			log.Warnf("models parse failed from %s: %v", url, err)
 			continue
 		}
-		if err := validateModelsCatalog(&parsed); err != nil {
-			log.Warnf("models validate failed from %s: %v", url, err)
+		merged, report, err := mergeDecodedModelsCatalog(current, decoded)
+		if err != nil {
+			log.Warnf("models merge failed from %s: %v", url, err)
 			continue
 		}
+		invalidNames := make([]string, 0, len(report.invalidSections))
+		for name := range report.invalidSections {
+			invalidNames = append(invalidNames, name)
+		}
+		sort.Strings(invalidNames)
+		for _, name := range invalidNames {
+			log.Warnf("models section %s from %s is invalid, keeping current section: %v", name, url, report.invalidSections[name])
+		}
 
-		return &parsed, url
+		return merged, url, report
 	}
-	return nil, ""
+	return nil, "", nil
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names
@@ -260,37 +352,15 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		return nil
 	}
 
-	type section struct {
-		provider string
-		oldList  []*ModelInfo
-		newList  []*ModelInfo
-	}
-
-	sections := []section{
-		{"claude", oldData.Claude, newData.Claude},
-		{"gemini", oldData.Gemini, newData.Gemini},
-		{"vertex", oldData.Vertex, newData.Vertex},
-		{"gemini-cli", oldData.GeminiCLI, newData.GeminiCLI},
-		{"aistudio", oldData.AIStudio, newData.AIStudio},
-		{"codex", oldData.CodexFree, newData.CodexFree},
-		{"codex", oldData.CodexTeam, newData.CodexTeam},
-		{"codex", oldData.CodexPlus, newData.CodexPlus},
-		{"codex", oldData.CodexPro, newData.CodexPro},
-		{"qwen", oldData.Qwen, newData.Qwen},
-		{"iflow", oldData.IFlow, newData.IFlow},
-		{"kimi", oldData.Kimi, newData.Kimi},
-		{"antigravity", oldData.Antigravity, newData.Antigravity},
-	}
-
-	seen := make(map[string]bool, len(sections))
+	seen := make(map[string]bool, len(modelCatalogSections))
 	var changed []string
-	for _, s := range sections {
-		if seen[s.provider] {
+	for _, section := range modelCatalogSections {
+		if seen[section.provider] {
 			continue
 		}
-		if modelSectionChanged(s.oldList, s.newList) {
-			changed = append(changed, s.provider)
-			seen[s.provider] = true
+		if modelSectionChanged(section.get(oldData), section.get(newData)) {
+			changed = append(changed, section.provider)
+			seen[section.provider] = true
 		}
 	}
 	return changed
@@ -360,16 +430,16 @@ func mergeProviderNames(existing, incoming []string) []string {
 }
 
 func loadModelsFromBytes(data []byte, source string) error {
-	var parsed staticModelsJSON
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	decoded, err := decodeModelsCatalog(data)
+	if err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
 	}
-	if err := validateModelsCatalog(&parsed); err != nil {
+	if err = validateCompleteDecodedCatalog(decoded); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)
 	}
 
 	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = &parsed
+	modelsCatalogStore.data = decoded.catalog
 	modelsCatalogStore.mu.Unlock()
 	return nil
 }
@@ -384,28 +454,8 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 	if data == nil {
 		return fmt.Errorf("catalog is nil")
 	}
-
-	requiredSections := []struct {
-		name   string
-		models []*ModelInfo
-	}{
-		{name: "claude", models: data.Claude},
-		{name: "gemini", models: data.Gemini},
-		{name: "vertex", models: data.Vertex},
-		{name: "gemini-cli", models: data.GeminiCLI},
-		{name: "aistudio", models: data.AIStudio},
-		{name: "codex-free", models: data.CodexFree},
-		{name: "codex-team", models: data.CodexTeam},
-		{name: "codex-plus", models: data.CodexPlus},
-		{name: "codex-pro", models: data.CodexPro},
-		{name: "qwen", models: data.Qwen},
-		{name: "iflow", models: data.IFlow},
-		{name: "kimi", models: data.Kimi},
-		{name: "antigravity", models: data.Antigravity},
-	}
-
-	for _, section := range requiredSections {
-		if err := validateModelSection(section.name, section.models); err != nil {
+	for _, section := range modelCatalogSections {
+		if err := validateModelSection(section.name, section.get(data)); err != nil {
 			return err
 		}
 	}
@@ -413,10 +463,6 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 }
 
 func validateModelSection(section string, models []*ModelInfo) error {
-	if len(models) == 0 {
-		return fmt.Errorf("%s section is empty", section)
-	}
-
 	seen := make(map[string]struct{}, len(models))
 	for i, model := range models {
 		if model == nil {

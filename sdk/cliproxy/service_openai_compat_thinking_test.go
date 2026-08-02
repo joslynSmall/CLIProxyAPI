@@ -16,7 +16,7 @@ func TestRegisterModelsForAuth_OpenAICompatUsesStaticThinkingSupportWhenUnset(t 
 				{
 					Name: "compat-static",
 					Models: []config.OpenAICompatibilityModel{
-						{Name: "gpt-5.2-codex"},
+						{Name: "gpt-5.5"},
 					},
 				},
 			},
@@ -38,7 +38,7 @@ func TestRegisterModelsForAuth_OpenAICompatUsesStaticThinkingSupportWhenUnset(t 
 
 	service.registerModelsForAuth(auth)
 
-	info := registry.GetGlobalRegistry().GetModelInfo("gpt-5.2-codex", "compat-static")
+	info := registry.GetGlobalRegistry().GetModelInfo("gpt-5.5", "compat-static")
 	if info == nil {
 		t.Fatalf("expected model to be registered")
 	}

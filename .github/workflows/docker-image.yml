@@ -17,8 +17,17 @@ jobs:
         uses: actions/checkout@v4
       - name: Refresh models catalog
         run: |
-          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          models_ref="$(cat internal/registry/models/REF)"
+          git fetch --depth 1 https://github.com/joslynSmall/models.git "$models_ref"
+          test "$(git rev-parse FETCH_HEAD)" = "$models_ref"
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate embedded models catalog
+        run: go test ./internal/registry -run TestEmbeddedCatalogSatisfiesSectionStateContract -count=1
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
@@ -52,8 +61,17 @@ jobs:
         uses: actions/checkout@v4
       - name: Refresh models catalog
         run: |
-          git fetch --depth 1 https://github.com/router-for-me/models.git main
+          models_ref="$(cat internal/registry/models/REF)"
+          git fetch --depth 1 https://github.com/joslynSmall/models.git "$models_ref"
+          test "$(git rev-parse FETCH_HEAD)" = "$models_ref"
           git show FETCH_HEAD:models.json > internal/registry/models/models.json
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate embedded models catalog
+        run: go test ./internal/registry -run TestEmbeddedCatalogSatisfiesSectionStateContract -count=1
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub

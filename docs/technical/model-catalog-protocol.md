@@ -5,7 +5,7 @@
 - 状态：Accepted
 - 版本：1
 - 日期：2026-08-02
-- 适用仓库：`router-for-me/models`、`CLIProxyAPI`
+- 适用仓库：`joslynSmall/models`、`CLIProxyAPI`
 - 适用载体：`models.json`
 
 本文档定义模型目录中 provider section 的状态语义。目录生产者和消费者必须共同遵守本协议，避免一个 provider 的缺失、下线或坏数据阻断其他 provider 的模型更新。

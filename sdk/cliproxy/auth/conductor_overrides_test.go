@@ -263,6 +263,55 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 	}
 }
 
+func TestManager_ReasoningParameterBadRequestDoesNotFailOverOrSuspendAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	model := "reasoning-parameter-" + uuid.NewString()
+	badAuth := &Auth{ID: "aa-reasoning-invalid", Provider: "codex"}
+	goodAuth := &Auth{ID: "bb-reasoning-valid", Provider: "codex"}
+	executor := &authFallbackExecutor{
+		id: "codex",
+		executeErrors: map[string]error{
+			badAuth.ID: &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    `{"detail":"Unsupported parameter: reasoning_effort"}`,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+	for _, auth := range []*Auth{badAuth, goodAuth} {
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected unsupported parameter error")
+	}
+	if got := executor.ExecuteCalls(); len(got) != 1 || got[0] != badAuth.ID {
+		t.Fatalf("execute calls = %v, want [%s]", got, badAuth.ID)
+	}
+
+	current, ok := m.GetByID(badAuth.ID)
+	if !ok || current == nil {
+		t.Fatal("bad auth was not retained")
+	}
+	if current.Unavailable || current.Status == StatusError {
+		t.Fatalf("bad auth state = unavailable:%t status:%s, want no failure state", current.Unavailable, current.Status)
+	}
+	if state := current.ModelStates[model]; state != nil && state.Unavailable {
+		t.Fatal("reasoning parameter error must not suspend the model")
+	}
+}
+
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{

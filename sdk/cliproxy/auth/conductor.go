@@ -2906,11 +2906,9 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 }
 
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it treats 400 responses with
-// "invalid_request_error", request-scoped 404 item misses caused by `store=false`,
-// and all 422 responses as request-shape failures, where switching auths or
-// pooled upstream models will not help. Model-support errors are excluded so
-// routing can fall through to another auth or upstream.
+// error that should not be retried or recorded as a credential failure. It shares
+// the circuit-breaker request-invalid classification while preserving model-support
+// errors as eligible for routing to another auth or upstream.
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -2918,17 +2916,8 @@ func isRequestInvalidError(err error) bool {
 	if isModelSupportError(err) {
 		return false
 	}
-	status := statusCodeFromError(err)
-	switch status {
-	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
-	case http.StatusNotFound:
-		return isRequestScopedNotFoundMessage(err.Error())
-	case http.StatusUnprocessableEntity:
-		return true
-	default:
-		return false
-	}
+	invalid, _ := IsRequestInvalidByStatus(statusCodeFromError(err), err.Error())
+	return invalid
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {

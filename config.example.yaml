@@ -180,7 +180,11 @@ provider-rate-limit:
 #   enabled: true
 #   auto-remove-threshold: 3
 
-# 入口层缺省思考深度策略（仅针对标准入口协议）
+# 入口层缺省思考深度策略（仅针对标准入口协议）。
+# 缺省值按请求 endpoint 序列化：/v1/chat/completions 使用 reasoning_effort；
+# /v1/responses 和 /v1/responses/compact 使用 reasoning.effort。
+# Responses 的顶层 reasoning_effort 在本 release 仍作为 deprecated compatibility alias 被接受并归一化为 reasoning.effort。
+# 仅在 reasoning compatibility event 中不再出现 legacy alias 相关的 accepted 或 stripped 事件后，才可计划单独的 strict-rejection release。
 # 可通过管理 API 实时更新并写回当前运行配置。
 # format/policy/mode/value 取值请以 /v0/management/reasoning-ingress-options 返回为准。
 default-reasoning-on-ingress-by-format:

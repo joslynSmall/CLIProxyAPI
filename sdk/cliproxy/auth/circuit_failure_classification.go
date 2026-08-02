@@ -126,6 +126,8 @@ func IsReasoningParameterErrorMessage(message string) bool {
 	}
 	return strings.Contains(lower, "not supported") ||
 		strings.Contains(lower, "unsupported") ||
+		strings.Contains(lower, "unknown parameter") ||
+		strings.Contains(lower, "unrecognized parameter") ||
 		strings.Contains(lower, "out of range") ||
 		strings.Contains(lower, "invalid")
 }

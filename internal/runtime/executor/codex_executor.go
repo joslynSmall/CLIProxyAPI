@@ -14,6 +14,7 @@ import (
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -122,6 +123,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
+	body = normalizeAndLogCodexReasoningEffortPayload(ctx, "/responses", "http", baseModel, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -255,6 +257,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
+	body = normalizeAndLogCodexReasoningEffortPayload(ctx, "/responses/compact", "http", baseModel, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -357,6 +360,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, _ = sjson.SetBytes(body, "instructions", "")
 	}
+	body = normalizeAndLogCodexReasoningEffortPayload(ctx, "/responses", "http", baseModel, body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -538,6 +542,44 @@ func enrichCodexCompletedPayloadWithText(payload []byte, text string) []byte {
 		return payload
 	}
 	return updated
+}
+
+func normalizeAndLogCodexReasoningEffortPayload(ctx context.Context, endpoint, protocol, model string, payload []byte) []byte {
+	normalized, stripped := normalizeCodexReasoningEffortPayload(payload)
+	if stripped {
+		logCodexReasoningCompatibilityEvent(ctx, endpoint, protocol, model, "stripped", "legacy_alias")
+	}
+	return normalized
+}
+
+func logCodexReasoningCompatibilityEvent(ctx context.Context, endpoint, protocol, model, action, reason string) {
+	log.WithFields(log.Fields{
+		"request_id": logging.GetRequestID(ctx),
+		"endpoint":   endpoint,
+		"protocol":   protocol,
+		"provider":   "codex",
+		"model":      thinking.ParseSuffix(model).ModelName,
+		"action":     action,
+		"reason":     reason,
+	}).Info("reasoning compatibility event")
+}
+
+func normalizeCodexReasoningEffortPayload(payload []byte) ([]byte, bool) {
+	legacy := gjson.GetBytes(payload, "reasoning_effort")
+	if !legacy.Exists() {
+		return payload, false
+	}
+
+	out := payload
+	if !gjson.GetBytes(out, "reasoning.effort").Exists() {
+		if updated, err := sjson.SetRawBytes(out, "reasoning.effort", []byte(legacy.Raw)); err == nil {
+			out = updated
+		}
+	}
+	if updated, err := sjson.DeleteBytes(out, "reasoning_effort"); err == nil {
+		out = updated
+	}
+	return out, !gjson.GetBytes(out, "reasoning_effort").Exists()
 }
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {

@@ -472,7 +472,7 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		close(errCh)
 
 		var bodyLog strings.Builder
-		completedOutput, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+		completedOutput, completed, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
 			ctx,
 			conn,
 			func(...interface{}) {},
@@ -483,6 +483,10 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		)
 		if err != nil {
 			serverErrCh <- err
+			return
+		}
+		if !completed {
+			serverErrCh <- errors.New("completed event not reported")
 			return
 		}
 		if gjson.GetBytes(completedOutput, "0.id").String() != "out-1" {
@@ -516,6 +520,67 @@ func TestForwardResponsesWebsocketPreservesCompletedEvent(t *testing.T) {
 		t.Fatalf("payload unexpectedly rewrote completed event: %s", payload)
 	}
 
+	if errServer := <-serverErrCh; errServer != nil {
+		t.Fatalf("server error: %v", errServer)
+	}
+}
+
+func TestForwardResponsesWebsocketReportsIncompleteOnError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	serverErrCh := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		defer conn.Close()
+
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+		data := make(chan []byte)
+		errCh := make(chan *interfaces.ErrorMessage, 1)
+		errCh <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New("invalid request")}
+		close(errCh)
+
+		var bodyLog strings.Builder
+		_, completed, errForward := handler.forwardResponsesWebsocket(
+			ctx,
+			conn,
+			func(...interface{}) {},
+			data,
+			errCh,
+			&bodyLog,
+			"session-1",
+		)
+		if errForward != nil {
+			serverErrCh <- errForward
+			return
+		}
+		if completed {
+			serverErrCh <- errors.New("error response must not report completion")
+			return
+		}
+		serverErrCh <- nil
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	_, payload, errReadMessage := conn.ReadMessage()
+	if errReadMessage != nil {
+		t.Fatalf("read websocket message: %v", errReadMessage)
+	}
+	if gjson.GetBytes(payload, "type").String() != "error" {
+		t.Fatalf("payload type = %s, want error", gjson.GetBytes(payload, "type").String())
+	}
 	if errServer := <-serverErrCh; errServer != nil {
 		t.Fatalf("server error: %v", errServer)
 	}

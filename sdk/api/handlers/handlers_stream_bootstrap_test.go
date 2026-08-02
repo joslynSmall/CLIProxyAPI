@@ -191,9 +191,10 @@ type sseDataErrorStreamExecutor struct{}
 type openAIResponsesErrorEventStreamExecutor struct{}
 
 type thinkingFallbackStreamExecutor struct {
-	mu     sync.Mutex
-	models []string
-	calls  int
+	mu           sync.Mutex
+	models       []string
+	calls        int
+	errorMessage string
 }
 
 type splitThenThinkingFallbackStreamExecutor struct {
@@ -476,12 +477,16 @@ func (e *thinkingFallbackStreamExecutor) ExecuteStream(_ context.Context, _ *cor
 	e.models = append(e.models, req.Model)
 	call := e.calls
 	model := req.Model
+	errMessage := e.errorMessage
 	e.mu.Unlock()
 
 	if call == 1 {
+		if errMessage == "" {
+			errMessage = `{"error":{"message":"level \"xhigh\" not supported, valid levels: high"}}`
+		}
 		return nil, &coreauth.Error{
 			Code:       "invalid_request",
-			Message:    `{"error":{"message":"level \"xhigh\" not supported, valid levels: high"}}`,
+			Message:    errMessage,
 			Retryable:  false,
 			HTTPStatus: http.StatusBadRequest,
 		}
@@ -1211,6 +1216,55 @@ func TestExecuteStreamWithAuthManager_FallbacksThinkingEffortBeforeFirstPayload(
 	}
 	if !strings.Contains(got.String(), "model=test-model(high)") {
 		t.Fatalf("expected downgraded model response, got %q", got.String())
+	}
+}
+
+func TestExecuteStreamWithAuthManager_UnsupportedReasoningParameterDoesNotFallback(t *testing.T) {
+	executor := &thinkingFallbackStreamExecutor{
+		errorMessage: `{"detail":"Unsupported parameter: reasoning_effort"}`,
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-thinking-unsupported-parameter",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Register(auth): %v", err)
+	}
+	registerTestModel(t, manager, auth)
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(),
+		"openai-response",
+		"test-model(xhigh)",
+		[]byte(`{"model":"test-model(xhigh)","reasoning_effort":"xhigh"}`),
+		"",
+	)
+	if dataChan != nil {
+		t.Fatal("unsupported parameter name should not start a retry stream")
+	}
+
+	errMsg, ok := <-errChan
+	if !ok || errMsg == nil {
+		t.Fatal("expected unsupported parameter error")
+	}
+	if errMsg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+	}
+	if errMsg.Error == nil || !strings.Contains(errMsg.Error.Error(), "Unsupported parameter: reasoning_effort") {
+		t.Fatalf("unexpected error: %+v", errMsg.Error)
+	}
+	if _, ok := <-errChan; ok {
+		t.Fatal("error channel should close after one upstream attempt")
+	}
+
+	models := executor.Models()
+	if len(models) != 1 || models[0] != "test-model(xhigh)" {
+		t.Fatalf("upstream attempts = %v, want [test-model(xhigh)]", models)
 	}
 }
 

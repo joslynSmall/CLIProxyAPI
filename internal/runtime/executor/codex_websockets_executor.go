@@ -210,6 +210,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		defer sess.reqMu.Unlock()
 	}
 
+	body = normalizeAndLogCodexReasoningEffortPayload(ctx, "/responses", "websocket", baseModel, body)
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 		URL:       wsURL,
@@ -420,6 +421,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
+	body = normalizeAndLogCodexReasoningEffortPayload(ctx, "/responses", "websocket", baseModel, body)
 	wsReqBody := buildCodexWebsocketRequestBody(body)
 	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 		URL:       wsURL,

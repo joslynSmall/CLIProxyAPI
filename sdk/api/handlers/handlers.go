@@ -531,6 +531,61 @@ func extractThinkingFallbackMessage(err error) string {
 	return raw
 }
 
+func hasThinkingEffortReference(message string) bool {
+	return strings.Contains(message, "reasoning_effort") ||
+		strings.Contains(message, "reasoning.effort") ||
+		(strings.Contains(message, "reasoning") && strings.Contains(message, "effort")) ||
+		strings.Contains(message, "thinking")
+}
+
+func isThinkingParameterNameError(message string) bool {
+	if !hasThinkingEffortReference(message) {
+		return false
+	}
+	for _, signal := range []string{
+		"unsupported parameter",
+		"unknown parameter",
+		"unrecognized parameter",
+		"invalid parameter name",
+	} {
+		if strings.Contains(message, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExplicitThinkingEffortValueConstraint(message string) bool {
+	hasUnsupportedSignal := strings.Contains(message, "not supported") ||
+		strings.Contains(message, "unsupported") ||
+		strings.Contains(message, "out of range") ||
+		strings.Contains(message, "invalid")
+	if !hasUnsupportedSignal {
+		return false
+	}
+
+	hasValidValueConstraint := strings.Contains(message, "valid level") ||
+		strings.Contains(message, "valid value") ||
+		strings.Contains(message, "allowed level") ||
+		strings.Contains(message, "allowed value") ||
+		strings.Contains(message, "supported level") ||
+		strings.Contains(message, "supported value") ||
+		strings.Contains(message, "must be one of") ||
+		strings.Contains(message, "expected one of")
+	if hasValidValueConstraint {
+		return true
+	}
+
+	if strings.Contains(message, "effort value") {
+		return true
+	}
+
+	return hasThinkingEffortReference(message) &&
+		(strings.Contains(message, "reasoning value") || strings.Contains(message, "thinking value") ||
+			strings.Contains(message, "reasoning level") || strings.Contains(message, "thinking level") ||
+			strings.Contains(message, "value") || strings.Contains(message, "level"))
+}
+
 func shouldFallbackThinkingEffort(err error) bool {
 	if err == nil {
 		return false
@@ -543,21 +598,89 @@ func shouldFallbackThinkingEffort(err error) bool {
 		}
 	}
 	msg := strings.ToLower(strings.TrimSpace(extractThinkingFallbackMessage(err)))
-	if msg == "" {
+	if msg == "" || isThinkingParameterNameError(msg) {
 		return false
 	}
-	if strings.Contains(msg, "valid levels") && strings.Contains(msg, "not supported") {
-		return true
+	return hasExplicitThinkingEffortValueConstraint(msg)
+}
+
+func thinkingFallbackReason(err error) string {
+	var thinkingErr *thinking.ThinkingError
+	if errors.As(err, &thinkingErr) && thinkingErr != nil {
+		switch thinkingErr.Code {
+		case thinking.ErrLevelNotSupported, thinking.ErrBudgetOutOfRange:
+			return "local_level_or_budget_validation"
+		}
 	}
-	hasThinkingKeyword := strings.Contains(msg, "reasoning_effort") ||
-		strings.Contains(msg, "reasoning.effort") ||
-		(strings.Contains(msg, "reasoning") && strings.Contains(msg, "effort")) ||
-		strings.Contains(msg, "thinking")
-	hasUnsupportedSignal := strings.Contains(msg, "not supported") ||
-		strings.Contains(msg, "unsupported") ||
-		strings.Contains(msg, "out of range") ||
-		strings.Contains(msg, "invalid")
-	return hasThinkingKeyword && hasUnsupportedSignal
+	return "upstream_effort_value_constraint"
+}
+
+func thinkingFallbackSuppressionReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(strings.TrimSpace(extractThinkingFallbackMessage(err)))
+	if message == "" || !hasThinkingEffortReference(message) {
+		return ""
+	}
+	if isThinkingParameterNameError(message) {
+		return "parameter_name_error"
+	}
+	if !hasExplicitThinkingEffortValueConstraint(message) {
+		return "not_effort_value_constraint"
+	}
+	return ""
+}
+
+func compatibilityEventEndpointAndProtocol(ctx context.Context) (string, string) {
+	_, endpoint := requestMethodAndPath(ctx)
+	if endpoint == "" {
+		endpoint = "unknown"
+	}
+	if endpoint == "/v1/responses/ws" {
+		return endpoint, "websocket"
+	}
+	return endpoint, "http"
+}
+
+func compatibilityEventModel(model string) string {
+	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if model == "" {
+		return "unknown"
+	}
+	return model
+}
+
+func compatibilityEventProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return "unresolved"
+	}
+	return provider
+}
+
+func logReasoningCompatibilityEvent(ctx context.Context, provider, model, action, reason string, warn bool) {
+	endpoint, protocol := compatibilityEventEndpointAndProtocol(ctx)
+	entry := log.WithFields(log.Fields{
+		"request_id": logging.GetRequestID(ctx),
+		"endpoint":   endpoint,
+		"protocol":   protocol,
+		"provider":   compatibilityEventProvider(provider),
+		"model":      compatibilityEventModel(model),
+		"action":     action,
+		"reason":     reason,
+	})
+	if warn {
+		entry.Warn("reasoning compatibility event")
+		return
+	}
+	entry.Info("reasoning compatibility event")
+}
+
+func logThinkingFallbackSuppression(ctx context.Context, providers []string, model string, err error) {
+	if reason := thinkingFallbackSuppressionReason(err); reason != "" {
+		logReasoningCompatibilityEvent(ctx, strings.Join(providers, ","), model, "suppressed", reason, true)
+	}
 }
 
 func nextLowerThinkingEffort(current string) (string, bool) {
@@ -672,15 +795,13 @@ func downgradeRequestThinkingEffort(ctx context.Context, providers []string, req
 		return req, opts, false
 	}
 
-	log.WithFields(log.Fields{
-		"request_id": logging.GetRequestID(ctx),
-		"providers":  strings.Join(providers, ","),
-		"model":      req.Model,
-		"from":       current,
-		"to":         next,
-		"error":      strings.TrimSpace(extractThinkingFallbackMessage(cause)),
-	}).Warn("thinking: effort fallback applied for request retry |")
+	logReasoningCompatibilityEvent(ctx, strings.Join(providers, ","), req.Model, "retried", thinkingFallbackReason(cause), false)
 	return newReq, newOpts, true
+}
+
+type reasoningCompatibilityEvent struct {
+	action string
+	reason string
 }
 
 type ingressReasoningScope int
@@ -763,6 +884,14 @@ func setJSONPathString(payload []byte, path string, value string) ([]byte, bool)
 	return updated, true
 }
 
+func setJSONPathRaw(payload []byte, path string, raw []byte) ([]byte, bool) {
+	updated, err := sjson.SetRawBytes(payload, path, raw)
+	if err != nil {
+		return payload, false
+	}
+	return updated, true
+}
+
 func deleteJSONPath(payload []byte, path string) []byte {
 	updated, err := sjson.DeleteBytes(payload, path)
 	if err != nil {
@@ -782,23 +911,62 @@ func shouldApplyIngressReasoningPolicy(policy string, explicit bool) bool {
 	}
 }
 
-func applyIngressOpenAIReasoning(payload []byte, entry internalconfig.ReasoningIngressDefault) ([]byte, bool) {
+func normalizedIngressReasoningAliasValue(value gjson.Result) string {
+	if value.Type == gjson.String {
+		return strings.ToLower(strings.TrimSpace(value.String()))
+	}
+	return strings.ToLower(strings.TrimSpace(value.Raw))
+}
+
+func normalizeIngressOpenAIResponsesReasoning(payload []byte) ([]byte, bool, reasoningCompatibilityEvent, error) {
+	legacy := gjson.GetBytes(payload, "reasoning_effort")
+	if !legacy.Exists() {
+		return payload, false, reasoningCompatibilityEvent{}, nil
+	}
+
+	native := gjson.GetBytes(payload, "reasoning.effort")
+	if native.Exists() {
+		if normalizedIngressReasoningAliasValue(legacy) != normalizedIngressReasoningAliasValue(native) {
+			return payload, false, reasoningCompatibilityEvent{action: "rejected", reason: "conflicting_aliases"}, errors.New("Invalid request: reasoning_effort conflicts with reasoning.effort")
+		}
+		updated := deleteJSONPath(payload, "reasoning_effort")
+		return updated, !bytes.Equal(updated, payload), reasoningCompatibilityEvent{action: "accepted", reason: "matching_aliases_normalized"}, nil
+	}
+
+	out := bytes.Clone(payload)
+	if updated, ok := setJSONPathRaw(out, "reasoning.effort", []byte(legacy.Raw)); ok {
+		out = updated
+	} else {
+		return payload, false, reasoningCompatibilityEvent{}, nil
+	}
+	updated := deleteJSONPath(out, "reasoning_effort")
+	return updated, !bytes.Equal(updated, payload), reasoningCompatibilityEvent{action: "accepted", reason: "legacy_alias_normalized"}, nil
+}
+
+func applyIngressOpenAIReasoning(payload []byte, scope ingressReasoningScope, entry internalconfig.ReasoningIngressDefault) ([]byte, bool) {
+	fieldPath := "reasoning_effort"
+	if scope == ingressReasoningScopeOpenAIResponses {
+		fieldPath = "reasoning.effort"
+	}
+	if entry.Policy == internalconfig.ReasoningIngressPolicyForceOverride {
+		out := bytes.Clone(payload)
+		for _, path := range []string{"reasoning_effort", "reasoning.effort"} {
+			out = deleteJSONPath(out, path)
+		}
+		if updated, ok := setJSONPathString(out, fieldPath, entry.Value); ok {
+			return updated, !bytes.Equal(updated, payload)
+		}
+		return payload, false
+	}
+
 	explicit := hasNonEmptyJSONValue(payload, "reasoning_effort") || hasNonEmptyJSONValue(payload, "reasoning.effort")
 	if !shouldApplyIngressReasoningPolicy(entry.Policy, explicit) {
 		return payload, false
 	}
-
-	out := bytes.Clone(payload)
-	changed := false
-	if updated, ok := setJSONPathString(out, "reasoning_effort", entry.Value); ok {
-		out = updated
-		changed = true
+	if updated, ok := setJSONPathString(payload, fieldPath, entry.Value); ok {
+		return updated, true
 	}
-	if updated, ok := setJSONPathString(out, "reasoning.effort", entry.Value); ok {
-		out = updated
-		changed = true
-	}
-	return out, changed
+	return payload, false
 }
 
 func applyIngressClaudeReasoning(payload []byte, entry internalconfig.ReasoningIngressDefault) ([]byte, bool) {
@@ -868,14 +1036,14 @@ func applyIngressGeminiReasoning(payload []byte, entry internalconfig.ReasoningI
 	return out, changed
 }
 
-func applyIngressReasoningDefaults(ctx context.Context, cfg *config.SDKConfig, handlerType string, rawJSON []byte) ([]byte, bool) {
-	if cfg == nil || len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
-		return rawJSON, false
+func applyIngressReasoningDefaults(ctx context.Context, cfg *config.SDKConfig, handlerType string, rawJSON []byte) ([]byte, bool, reasoningCompatibilityEvent, error) {
+	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+		return rawJSON, false, reasoningCompatibilityEvent{}, nil
 	}
 
 	scope := resolveIngressReasoningScope(ctx, handlerType)
 	if scope == ingressReasoningScopeUnknown {
-		return rawJSON, false
+		return rawJSON, false, reasoningCompatibilityEvent{}, nil
 	}
 
 	var (
@@ -891,35 +1059,57 @@ func applyIngressReasoningDefaults(ctx context.Context, cfg *config.SDKConfig, h
 	case ingressReasoningScopeGeminiGenerateContent:
 		format = internalconfig.ReasoningIngressFormatGemini
 	default:
-		return rawJSON, false
+		return rawJSON, false, reasoningCompatibilityEvent{}, nil
+	}
+	if cfg != nil {
+		entry, ok = internalconfig.ResolveReasoningOnIngressEntry(cfg.DefaultReasoningOnIngressByFormat, format)
 	}
 
-	entry, ok = internalconfig.ResolveReasoningOnIngressEntry(cfg.DefaultReasoningOnIngressByFormat, format)
+	changed := false
+	compatibilityEvent := reasoningCompatibilityEvent{}
+	if scope == ingressReasoningScopeOpenAIResponses && (!ok || entry.Policy != internalconfig.ReasoningIngressPolicyForceOverride) {
+		var normalizedChanged bool
+		var err error
+		rawJSON, normalizedChanged, compatibilityEvent, err = normalizeIngressOpenAIResponsesReasoning(rawJSON)
+		if err != nil {
+			return rawJSON, false, compatibilityEvent, err
+		}
+		changed = normalizedChanged
+	}
 	if !ok {
-		return rawJSON, false
+		return rawJSON, changed, compatibilityEvent, nil
 	}
 
+	var defaultsChanged bool
 	switch format {
 	case internalconfig.ReasoningIngressFormatOpenAI:
-		return applyIngressOpenAIReasoning(rawJSON, entry)
+		rawJSON, defaultsChanged = applyIngressOpenAIReasoning(rawJSON, scope, entry)
 	case internalconfig.ReasoningIngressFormatClaude:
-		return applyIngressClaudeReasoning(rawJSON, entry)
+		rawJSON, defaultsChanged = applyIngressClaudeReasoning(rawJSON, entry)
 	case internalconfig.ReasoningIngressFormatGemini:
-		return applyIngressGeminiReasoning(rawJSON, entry)
+		rawJSON, defaultsChanged = applyIngressGeminiReasoning(rawJSON, entry)
 	default:
-		return rawJSON, false
+		return rawJSON, changed, compatibilityEvent, nil
 	}
+	return rawJSON, changed || defaultsChanged, compatibilityEvent, nil
 }
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	updatedRawJSON, changed, compatibilityEvent, ingressErr := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON)
+	if compatibilityEvent.action != "" {
+		logReasoningCompatibilityEvent(ctx, "unresolved", modelName, compatibilityEvent.action, compatibilityEvent.reason, ingressErr != nil)
+	}
+	if ingressErr != nil {
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: ingressErr}
+	}
+	if changed {
+		rawJSON = updatedRawJSON
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
-	}
-	if updatedRawJSON, changed := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON); changed {
-		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.IngressRequestedModelMetadataKey] = normalizedModel
@@ -959,6 +1149,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 				continue
 			}
 		}
+		logThinkingFallbackSuppression(ctx, providers, req.Model, err)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -983,12 +1174,19 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	updatedRawJSON, changed, compatibilityEvent, ingressErr := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON)
+	if compatibilityEvent.action != "" {
+		logReasoningCompatibilityEvent(ctx, "unresolved", modelName, compatibilityEvent.action, compatibilityEvent.reason, ingressErr != nil)
+	}
+	if ingressErr != nil {
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: ingressErr}
+	}
+	if changed {
+		rawJSON = updatedRawJSON
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
-	}
-	if updatedRawJSON, changed := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON); changed {
-		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.IngressRequestedModelMetadataKey] = normalizedModel
@@ -1034,15 +1232,25 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	updatedRawJSON, changed, compatibilityEvent, ingressErr := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON)
+	if compatibilityEvent.action != "" {
+		logReasoningCompatibilityEvent(ctx, "unresolved", modelName, compatibilityEvent.action, compatibilityEvent.reason, ingressErr != nil)
+	}
+	if ingressErr != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: ingressErr}
+		close(errChan)
+		return nil, nil, errChan
+	}
+	if changed {
+		rawJSON = updatedRawJSON
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
-	}
-	if updatedRawJSON, changed := applyIngressReasoningDefaults(ctx, h.Cfg, handlerType, rawJSON); changed {
-		rawJSON = updatedRawJSON
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.IngressRequestedModelMetadataKey] = normalizedModel
@@ -1082,6 +1290,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				continue
 			}
 		}
+		logThinkingFallbackSuppression(ctx, providers, req.Model, err)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -1270,6 +1479,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						}
 						streamErr = retryErr
 					}
+					logThinkingFallbackSuppression(ctx, providers, req.Model, streamErr)
 				}
 
 				status := http.StatusInternalServerError

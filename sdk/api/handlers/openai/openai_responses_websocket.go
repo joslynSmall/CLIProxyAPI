@@ -178,9 +178,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
-		lastRequest = updatedLastRequest
-		lastSyntheticPrewarmResponseID = ""
-
+		candidateLastRequest := updatedLastRequest
+		candidatePinnedAuthID := pinnedAuthID
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
@@ -198,19 +197,25 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					return
 				}
 				if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
-					pinnedAuthID = authID
+					candidatePinnedAuthID = authID
 				}
 			})
 		}
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
-		completedOutput, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
+		completedOutput, completed, errForward := h.forwardResponsesWebsocket(c, conn, cliCancel, dataChan, errChan, &wsBodyLog, passthroughSessionID)
 		if errForward != nil {
 			wsTerminateErr = errForward
 			appendWebsocketEvent(&wsBodyLog, "disconnect", []byte(errForward.Error()))
 			log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			return
 		}
+		if !completed {
+			continue
+		}
+		lastRequest = candidateLastRequest
+		pinnedAuthID = candidatePinnedAuthID
+		lastSyntheticPrewarmResponseID = ""
 		lastResponseOutput = completedOutput
 	}
 }
@@ -661,7 +666,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsBodyLog *strings.Builder,
 	sessionID string,
-) ([]byte, error) {
+) ([]byte, bool, error) {
 	completed := false
 	completedOutput := []byte("[]")
 	chunkCarry := []byte(nil)
@@ -690,7 +695,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
-			return completedOutput, c.Request.Context().Err()
+			return completedOutput, false, c.Request.Context().Err()
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -716,7 +721,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// 	errWrite,
 					// )
 					cancel(errMsg.Error)
-					return completedOutput, errWrite
+					return completedOutput, false, errWrite
 				}
 			}
 			if errMsg != nil {
@@ -724,7 +729,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			} else {
 				cancel(nil)
 			}
-			return completedOutput, nil
+			return completedOutput, false, nil
 		case chunk, ok := <-data:
 			if !ok {
 				payloads, remaining := websocketJSONPayloadsFromChunkWithCarry(chunkCarry, nil, true)
@@ -732,7 +737,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				for i := range payloads {
 					if errWrite := writePayload(payloads[i]); errWrite != nil {
 						cancel(errWrite)
-						return completedOutput, errWrite
+						return completedOutput, false, errWrite
 					}
 				}
 				if !completed {
@@ -759,13 +764,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 							errWrite,
 						)
 						cancel(errMsg.Error)
-						return completedOutput, errWrite
+						return completedOutput, false, errWrite
 					}
 					cancel(errMsg.Error)
-					return completedOutput, nil
+					return completedOutput, false, nil
 				}
 				cancel(nil)
-				return completedOutput, nil
+				return completedOutput, true, nil
 			}
 
 			payloads, remaining := websocketJSONPayloadsFromChunkWithCarry(chunkCarry, chunk, false)
@@ -773,7 +778,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				if errWrite := writePayload(payloads[i]); errWrite != nil {
 					cancel(errWrite)
-					return completedOutput, errWrite
+					return completedOutput, false, errWrite
 				}
 			}
 		}

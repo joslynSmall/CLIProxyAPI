@@ -5,15 +5,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 )
 
 type thinkingFallbackNonStreamExecutor struct {
@@ -66,6 +71,51 @@ func (e *thinkingFallbackNonStreamExecutor) Models() []string {
 	return out
 }
 
+func TestShouldFallbackThinkingEffort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "typed unsupported level",
+			err:  thinking.NewThinkingError(thinking.ErrLevelNotSupported, "level not supported"),
+			want: true,
+		},
+		{
+			name: "typed budget out of range",
+			err:  thinking.NewThinkingError(thinking.ErrBudgetOutOfRange, "budget out of range"),
+			want: true,
+		},
+		{
+			name: "upstream valid level constraint",
+			err:  fmt.Errorf(`{"error":{"message":"level \"xhigh\" not supported, valid levels: high"}}`),
+			want: true,
+		},
+		{
+			name: "upstream unsupported effort value",
+			err:  fmt.Errorf(`{"error":{"message":"unsupported effort value: xhigh"}}`),
+			want: true,
+		},
+		{
+			name: "unsupported parameter name",
+			err:  fmt.Errorf(`{"detail":"Unsupported parameter: reasoning_effort"}`),
+			want: false,
+		},
+		{
+			name: "parameter unsupported without a value constraint",
+			err:  fmt.Errorf(`{"error":{"message":"reasoning.effort is not supported for this request"}}`),
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldFallbackThinkingEffort(tc.err); got != tc.want {
+				t.Fatalf("shouldFallbackThinkingEffort() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExecuteWithAuthManager_FallbacksThinkingEffort(t *testing.T) {
 	executor := &thinkingFallbackNonStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -109,7 +159,10 @@ func TestExecuteWithAuthManager_FallbacksThinkingEffort(t *testing.T) {
 	}
 }
 
-func TestExecuteWithAuthManager_ReasoningFallbackDoesNotOpenCodexCircuitBreaker(t *testing.T) {
+func TestExecuteWithAuthManager_UnsupportedReasoningParameterDoesNotRetryOrOpenCircuitBreaker(t *testing.T) {
+	hook := logrustest.NewLocal(log.StandardLogger())
+	defer hook.Reset()
+
 	const (
 		authID  = "codex-reasoning-fallback-auth"
 		modelID = "codex-reasoning-fallback-model"
@@ -124,7 +177,7 @@ func TestExecuteWithAuthManager_ReasoningFallbackDoesNotOpenCodexCircuitBreaker(
 		attempts++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"reasoning.effort is not supported for this request"}}`))
+		_, _ = w.Write([]byte(`{"detail":"Unsupported parameter: reasoning_effort"}`))
 	}))
 	defer upstream.Close()
 
@@ -159,8 +212,9 @@ func TestExecuteWithAuthManager_ReasoningFallbackDoesNotOpenCodexCircuitBreaker(
 	})
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	requestCtx := logging.WithRequestID(ingressTestContext("POST", "/v1/responses"), "request-fallback-suppressed")
 	_, _, errMsg := handler.ExecuteWithAuthManager(
-		context.Background(),
+		requestCtx,
 		"openai-response",
 		modelID+"(medium)",
 		[]byte(`{"model":"codex-reasoning-fallback-model(medium)","input":"hi","reasoning":{"effort":"medium"}}`),
@@ -172,10 +226,41 @@ func TestExecuteWithAuthManager_ReasoningFallbackDoesNotOpenCodexCircuitBreaker(
 	if errMsg.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
 	}
-	if attempts != 4 {
-		t.Fatalf("upstream attempts = %d, want 4 for medium -> low -> minimal -> none", attempts)
+	if attempts != 1 {
+		t.Fatalf("upstream attempts = %d, want 1 for unsupported parameter name", attempts)
 	}
 	if reg.IsCircuitOpen(authID, modelID) {
 		t.Fatalf("reasoning parameter failures must not open circuit for %q", modelID)
 	}
+
+	for _, entry := range hook.AllEntries() {
+		if entry.Message != "reasoning compatibility event" || entry.Data["action"] != "suppressed" || entry.Data["reason"] != "parameter_name_error" {
+			continue
+		}
+		if entry.Level != log.WarnLevel {
+			t.Fatalf("suppression level = %s, want %s", entry.Level, log.WarnLevel)
+		}
+		want := map[string]string{
+			"request_id": "request-fallback-suppressed",
+			"endpoint":   "/v1/responses",
+			"protocol":   "http",
+			"provider":   "codex",
+			"model":      modelID,
+			"action":     "suppressed",
+			"reason":     "parameter_name_error",
+		}
+		if len(entry.Data) != len(want) {
+			t.Fatalf("suppression fields = %#v, want only %#v", entry.Data, want)
+		}
+		for key, value := range want {
+			if got, ok := entry.Data[key]; !ok || got != value {
+				t.Fatalf("suppression field %q = %#v, want %q", key, got, value)
+			}
+		}
+		if serialized := entry.Message + fmt.Sprint(entry.Data); strings.Contains(serialized, "Unsupported parameter: reasoning_effort") {
+			t.Fatalf("suppression event leaked upstream error: %s", serialized)
+		}
+		return
+	}
+	t.Fatal("expected fallback suppression compatibility event")
 }

@@ -162,4 +162,5 @@ flowchart LR
 ## 相关文档
 
 - 专项治理流程：[../产品经理业务流程说明.md](../产品经理业务流程说明.md)
-- 生产部署手册：[deploy-ssh-227.md](deploy-ssh-227.md)
+- 227 production deployment: [deploy-ssh-227.md](deploy-ssh-227.md)
+- HK production deployment: [deploy-ssh-hk.md](deploy-ssh-hk.md)

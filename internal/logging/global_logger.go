@@ -27,7 +27,10 @@ var (
 	rotateCancel   context.CancelFunc
 )
 
-const runtimeLogMaxSizeMB = 1024 * 1024
+const (
+	runtimeLogMaxSizeMB                = 1024 * 1024
+	reasoningCompatibilityEventMessage = "reasoning compatibility event"
+)
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
@@ -36,6 +39,10 @@ type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
 var logFieldOrder = []string{"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error"}
+
+// reasoningCompatibilityLogFieldOrder is deliberately fixed so compatibility
+// events remain auditable without rendering arbitrary entry data.
+var reasoningCompatibilityLogFieldOrder = []string{"request_id", "endpoint", "protocol", "provider", "model", "action", "reason"}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
@@ -60,11 +67,17 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 	}
 	levelStr := fmt.Sprintf("%-5s", level)
 
-	// Build fields string (only print fields in logFieldOrder)
+	// Compatibility events use a fixed categorical-field allowlist. All other
+	// entries retain the established general field rendering behavior.
+	fieldOrder := logFieldOrder
+	if entry.Message == reasoningCompatibilityEventMessage {
+		fieldOrder = reasoningCompatibilityLogFieldOrder
+	}
+
 	var fieldsStr string
 	if len(entry.Data) > 0 {
 		var fields []string
-		for _, k := range logFieldOrder {
+		for _, k := range fieldOrder {
 			if v, ok := entry.Data[k]; ok {
 				fields = append(fields, fmt.Sprintf("%s=%v", k, v))
 			}

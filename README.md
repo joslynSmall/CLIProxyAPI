@@ -56,16 +56,17 @@ cp config.example.yaml config.yaml
 
 ### Configuration Files
 
-The project uses local runtime configuration files. `config.yaml` and authentication data remain excluded from Git; the private 227 production `state-store.local.ini` is versioned so its deployed state can be verified before releases:
+The project uses local runtime configuration files. `config.yaml` and authentication data remain excluded from Git. The private deployment configuration files for 227 and HK are versioned to make release-time parity checks possible:
 
 | File | Purpose | `auth-dir` |
 |------|---------|------------|
 | `config.yaml` | Local development | `./auths` (local relative path) |
 | `config.yaml` on 227 | Server-local production configuration | `/opt/cliproxy/auths` |
 | `state-store.local.ini` | Versioned private 227 Mongo runtime-state configuration | N/A |
-| `config_hk.yaml` | Production (ssh hk) | `auths` (`/home/ubuntu/cli-proxy-hk/auths`) |
+| `config_hk.yaml` | Versioned private HK production configuration | `/home/ubuntu/cli-proxy-hk/auths` |
+| `state-store.hk.ini` | Versioned private HK Mongo runtime-state configuration | N/A |
 
-`config.example.yaml` and `state-store.example.ini` are portable templates. The 227 release preflight compares the versioned `state-store.local.ini` hash with the remote file, and aborts on drift. Never commit `config.yaml`, `auths/`, `.new` state-store staging files, or state-store backups. The 227 deployment procedure is documented in [docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md).
+`config.example.yaml` and `state-store.example.ini` are portable templates. Every ordinary release compares the remote and versioned private configuration hashes, then aborts on drift. Never commit `config.yaml`, `auths/`, `.new` staging files, or backups. The production procedures are documented in [docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md) and [docs/technical/deploy-ssh-hk.md](docs/technical/deploy-ssh-hk.md).
 
 Timeout and cancellation diagnostics:
 
@@ -79,7 +80,7 @@ Timeout and cancellation diagnostics:
 - **227 production deployment**: `./cli-proxy -config config.yaml`
 - **ssh hk production deployment**: `/home/ubuntu/cli-proxy-hk/cli-proxy-api.bin -config /home/ubuntu/cli-proxy-hk/config_hk.yaml`
 
-For `ssh hk` deployments, do not overwrite production with a stale repo copy of `config_hk.yaml`. Pull `/home/ubuntu/cli-proxy-hk/config_hk.yaml` to local first, modify on top of that production snapshot, then upload it back.
+For HK production, the versioned local configuration must match the remote hash before a binary release. Do not use source synchronization or a binary release to upload, overwrite, create, or edit `config_hk.yaml`, `state-store.hk.ini`, `auths/`, or logs; use the approved configuration-release path instead.
 
 For detailed configuration options, see the [User Manual](https://help.router-for.me/cn/).
 

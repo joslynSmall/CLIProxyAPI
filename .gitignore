@@ -15,6 +15,9 @@ config_hk.yaml
 config_hk.yaml.bak.*
 state-store.*.ini
 !state-store.example.ini
+!state-store.local.ini
+state-store.local.ini.new
+state-store.local.ini.bak.*
 .env
 
 # Generated content

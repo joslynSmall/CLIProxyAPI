@@ -56,13 +56,16 @@ cp config.example.yaml config.yaml
 
 ### Configuration Files
 
-The project uses **two config files** for different environments:
+The project uses local runtime configuration files. `config.yaml` and authentication data remain excluded from Git; the private 227 production `state-store.local.ini` is versioned so its deployed state can be verified before releases:
 
 | File | Purpose | `auth-dir` |
 |------|---------|------------|
 | `config.yaml` | Local development | `./auths` (local relative path) |
-| `config-277.yaml` | Production (227 server) | `/opt/cliproxy/auths` |
+| `config.yaml` on 227 | Server-local production configuration | `/opt/cliproxy/auths` |
+| `state-store.local.ini` | Versioned private 227 Mongo runtime-state configuration | N/A |
 | `config_hk.yaml` | Production (ssh hk) | `auths` (`/home/ubuntu/cli-proxy-hk/auths`) |
+
+`config.example.yaml` and `state-store.example.ini` are portable templates. The 227 release preflight compares the versioned `state-store.local.ini` hash with the remote file, and aborts on drift. Never commit `config.yaml`, `auths/`, `.new` state-store staging files, or state-store backups. The 227 deployment procedure is documented in [docs/technical/deploy-ssh-227.md](docs/technical/deploy-ssh-227.md).
 
 Timeout and cancellation diagnostics:
 
@@ -73,7 +76,7 @@ Timeout and cancellation diagnostics:
 
 - **Local development (recommended)**: `./bin/air` (managed by `.air.toml`, equivalent to running with `-config config.yaml`)
 - **Fallback local run**: `go run ./cmd/server`
-- **Production deployment**: `./cli-proxy-new -config config-277.yaml`
+- **227 production deployment**: `./cli-proxy -config config.yaml`
 - **ssh hk production deployment**: `/home/ubuntu/cli-proxy-hk/cli-proxy-api.bin -config /home/ubuntu/cli-proxy-hk/config_hk.yaml`
 
 For `ssh hk` deployments, do not overwrite production with a stale repo copy of `config_hk.yaml`. Pull `/home/ubuntu/cli-proxy-hk/config_hk.yaml` to local first, modify on top of that production snapshot, then upload it back.
@@ -83,7 +86,7 @@ For detailed configuration options, see the [User Manual](https://help.router-fo
 ### Docker
 
 ```bash
-docker run -v ./config-277.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
+docker run -v ./config.yaml:/app/config.yaml -p 8080:8080 ghcr.io/router-for-me/cliproxyapi:latest
 ```
 
 ## Project Structure

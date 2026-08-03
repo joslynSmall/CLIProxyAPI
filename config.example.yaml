@@ -176,6 +176,8 @@ provider-rate-limit:
 
 # 熔断器自动移除：当同一 auth+模型对反复进入 OPEN 状态时，自动从模型列表中移除。
 # auto-remove-threshold: 达到多少次 OPEN 周期后触发自动移除（默认 3）。
+# 启用后必须在启动前提供 state-store.local.ini；该文件包含 Mongo 凭据。
+# 私有生产仓库可将其作为受控配置版本管理，但发布过程不得在服务器上直接编辑或覆盖它。
 # circuit-breaker-auto-removal:
 #   enabled: true
 #   auto-remove-threshold: 3
